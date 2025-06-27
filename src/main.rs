@@ -6,7 +6,7 @@ const PORT: &str = "COM5";
 const BAUD: u32 = 115_200;
 
 /// 對應 Arduino encode_cbor() 內兩個 9 元素子陣列
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Motion {
     name: String, // 馬達名子 string "PMt" / "PMb"
     id: u8, // 數值 int8
@@ -58,7 +58,8 @@ fn main() -> anyhow::Result<()> {
         temp: 26.0,
         mode: 0,
     };
-    let payload = ("M", vec![m1, m2]); // 對應外層 3 元素陣列
+    let payload = vec![m1, m2]; // 對應外層 3 元素陣列
+    println!("Payload: {:#?}", payload);
     let cbor: Vec<u8> = serde_cbor::to_vec(&payload)?;
     for i in 0..cbor.len() {
         if i % 16 == 0 {
