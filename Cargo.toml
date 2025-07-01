@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+cobs = { version = "0.4.0", features = ["serde"] }
+crc = "3.3.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_cbor = "0.11.2"
 serialport = "4.7.2"
