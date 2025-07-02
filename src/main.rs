@@ -3,9 +3,9 @@ use cobs::encode;
 use serde::{ Serialize, Deserialize };
 use crc::{ Crc, CRC_16_USB };
 
-const PORT: &str = "COM5";
-const BAUD: u32 = 115_200;
+const BAUD: u32 = 460_800;
 const CRC16: Crc<u16> = Crc::<u16>::new(&CRC_16_USB);
+const START_BYTE: u8 = 0x7E; // 開始 byte
 
 /// 對應 Arduino encode_cbor() 內兩個 9 元素子陣列
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,91 +26,54 @@ struct Motion {
     mode: u8, // 馬達運行模式，數值int8，0:default，1:位置，2:速度
 }
 
+fn build_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 5);
+    
+    frame.push(START_BYTE); // 開始 byte
+
+    let len = payload.len() as u16;
+    frame.extend(len.to_le_bytes());
+    println!("Payload 長度: {} {:02X?}", len, len.to_le_bytes());
+
+    frame.extend(payload);
+
+    let crc = CRC16.checksum(&frame[1..]); // 跳過 START_BYTE
+    frame.extend(crc.to_le_bytes()); // lo, hi
+    println!("CRC: {} {:02X?}", crc, crc.to_le_bytes());
+
+    frame
+}
+
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let port_name = if args.len() > 1 {
+        &args[1]
+    } else {
+        "COM5" // 默認端口
+    };
+    println!("使用串口: {}", port_name);
     // 1️⃣ 準備資料
-    let m1 = Motion {
-        name: "PMt".into(),
-        id: 5,
-        motion: 1,
-        speed: 100,
-        tol: 5,
-        dist: 2000,
-        angle: 100,
-        time: 5000,
-        acc: 300,
-        newid: 0,
-        volt: 12.0,
-        amp: 0.5,
-        temp: 25.0,
-        mode: 0,
-    };
-    let m2 = Motion {
-        name: "PMb".into(),
-        id: 4,
-        motion: 1,
-        speed: 100,
-        tol: 2,
-        dist: 1900,
-        angle: 60,
-        time: 4000,
-        acc: 400,
-        newid: 0,
-        volt: 12.0,
-        amp: 0.6,
-        temp: 26.0,
-        mode: 0,
-    };
+    let m1 = Motion {name: "PMt".into(),id: 5,motion: 1,speed: 100,tol: 5,dist: 2000,angle: 100,time: 5000,acc: 300,newid: 0,volt: 12.0,amp: 0.5,temp: 25.0,mode: 0};
+    let m2 = Motion {name: "PMb".into(),id: 4,motion: 1,speed: 100,tol: 2,dist: 1900,angle: 60,time: 4000,acc: 400,newid: 0,volt: 12.0,amp: 0.6,temp: 26.0,mode: 0};
     let payload = vec![m1, m2]; // 對應外層 3 元素陣列
-    // println!("Payload: {:#?}", payload);
+    println!("Payload: {:?}", payload);
     let payload_cbor: Vec<u8> = serde_cbor::to_vec(&payload)?;
-    println!("CBOR 資料:");
-    for i in 0..payload_cbor.len() {
-        if i != 0 && i % 16 == 0 {
-            println!();
-        }
-        print!("{:02x} ", payload_cbor[i]);
-    }
-    println!("\nCBOR 長度: {}", payload_cbor.len());
-    let dst_frame = payload_cbor.clone();
-    let cmd_byte = 0x01u8;
-    let mut frame = vec![0, 0]; // 前兩個 byte 預留給長度
-    frame.push(cmd_byte); // 指令 byte
-    frame.extend(&payload_cbor); // 加入 CBOR 資料
-    let crc = CRC16.checksum(&frame[2..]); // 計算 CRC 從第 3 個 byte 開始, 指令+CBOR 資料
-    println!("Rust 端 CRC (hex): {:04X}", crc);
-    frame.extend(crc.to_be_bytes());
-    let len = (frame.len() - 2) as u16; // 長度為總長度減去前兩個 byte
-    frame[0] = (len >> 8) as u8; // 高位
-    frame[1] = len as u8; // 低位
-    println!("Frame 長度: {}", frame.len());
-    println!("Frame 資料:");
-    for i in 0..frame.len() {
-        if i != 0 && i % 16 == 0 {
-            println!();
-        }
-        print!("{:02x} ", frame[i]);
-    }
-    println!("");
+    println!("CBOR 資料: {:02X?}", payload_cbor);
+    println!("CBOR 長度: {}", payload_cbor.len());
+    let frame = build_frame(&payload_cbor);
     let dst_frame = frame.clone();
     // let mut dst_frame = vec![0; frame.len() + 1]; // COBS 編碼後長度會增加
     // let _encoded_size = encode(&frame, &mut dst_frame);
     // // println!("Encoded Frame size: {}", encoded_size);
-    // println!("Encoded Frame:");
-    // for i in 0..dst_frame.len() {
-    //     if i != 0 && i % 16 == 0 {
-    //         println!();
-    //     }
-    //     print!("{:02x} ", dst_frame[i]);
-    // }
-    // println!("");
+    // println!("Encoded Frame: {:02X?}", dst_frame);
     // 2️⃣ 打開序列埠
     let mut port = serialport
-        ::new(PORT, BAUD)
+        ::new(port_name, BAUD)
         .timeout(Duration::from_millis(500))
         .open()
         .expect("Failed to open serial port");
 
-    port.write_all(b"SEND\n")?;
+    // port.write_all(b"SEND\n")?;
     port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
     // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
     port.flush()?; // 確保資料已經寫入
@@ -136,7 +99,7 @@ fn main() -> anyhow::Result<()> {
                             elapsed / times
                         );
                         sleep(Duration::from_millis(1));
-                        port.write_all(b"SEND\n")?;
+                        // port.write_all(b"SEND\n")?;
                         port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
                         // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
                         port.flush()?; // 確保資料已經寫入
@@ -147,7 +110,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     "starting..." => {
                         println!("{} ✓ Arduino 開始處理", line.trim());
-                        port.write_all(b"SEND\n")?;
+                        // port.write_all(b"SEND\n")?;
                         port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
                         // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
                         port.flush()?; // 確保資料已經寫入
@@ -155,6 +118,21 @@ fn main() -> anyhow::Result<()> {
                     }
                     "Arduino CBOR Receiver Ready" => {
                         println!("{} ✓ Arduino 已準備好接收 CBOR 資料", line.trim());
+                        port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
+                        // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
+                        port.flush()?; // 確保資料已經寫入
+                        times += 1;
+                    }
+                    "CBOR Motor Receiver Ready" => {
+                        println!("{} ✓ Arduino 已準備好接收馬達資料", line.trim());
+                        port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
+                        // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
+                        port.flush()?; // 確保資料已經寫入
+                        times += 1;
+                    }
+                    "Ready for next frame" => {
+                        let elapsed = start_time.elapsed();
+                        println!("{} ✓ Arduino 準備好接收下一個幀, 平均耗時: {:.2?}, 次數: {}", line.trim(), elapsed / times, times);
                         port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
                         // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
                         port.flush()?; // 確保資料已經寫入
