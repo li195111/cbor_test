@@ -1,4 +1,4 @@
-use std::{ thread::sleep, time::Duration };
+use std::{ thread::sleep, time::Duration, vec };
 use cobs::encode;
 use serde::{ Serialize, Deserialize };
 use crc::{ Crc, CRC_16_USB };
@@ -30,6 +30,13 @@ fn build_frame(payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(payload.len() + 5);
     
     frame.push(START_BYTE); // 開始 byte
+    // Version Byte
+    frame.push(0x01); // 版本號，假設為 1
+    println!("Version Byte: {:02X?}", frame[1]);
+
+    // Command Byte
+    frame.push(0x06); // 命令 byte，假設為 6
+    println!("Command Byte: {:02X?}", frame[2]);
 
     let len = payload.len() as u16;
     frame.extend(len.to_le_bytes());
@@ -37,7 +44,7 @@ fn build_frame(payload: &[u8]) -> Vec<u8> {
 
     frame.extend(payload);
 
-    let crc = CRC16.checksum(&frame[1..]); // 跳過 START_BYTE
+    let crc = CRC16.checksum(&frame[3..]); // 跳過 START_BYTE, Version Byte, Command Byte
     frame.extend(crc.to_le_bytes()); // lo, hi
     println!("CRC: {} {:02X?}", crc, crc.to_le_bytes());
 
@@ -45,6 +52,13 @@ fn build_frame(payload: &[u8]) -> Vec<u8> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let payload = 0; // 空的 payload
+    println!("Empty PayLoad: {}", payload);
+    let payload_cbor = serde_cbor::to_vec(&payload)?;
+    println!("Empty PayLoad CBOR: {:02X?}", payload_cbor);
+    let frame = build_frame(&payload_cbor);
+    println!("Empty Frame: {:02X?}", frame);
+
     let args: Vec<String> = std::env::args().collect();
     let port_name = if args.len() > 1 {
         &args[1]
@@ -133,6 +147,7 @@ fn main() -> anyhow::Result<()> {
                     "Ready for next frame" => {
                         let elapsed = start_time.elapsed();
                         println!("{} ✓ Arduino 準備好接收下一個幀, 平均耗時: {:.2?}, 次數: {}", line.trim(), elapsed / times, times);
+                        sleep(Duration::from_millis(1));
                         port.write_all(&dst_frame)?; // 傳送 COBS 編碼後的資料
                         // port.write_all(&[0x00])?; // COBS 編碼後的結尾 byte
                         port.flush()?; // 確保資料已經寫入
