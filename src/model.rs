@@ -1,11 +1,12 @@
 use std::fmt::Display;
 use serde::{ Serialize, Deserialize };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum CMD {
     SEND = 0xaa, // 發送資料
     READ = 0xa8, // 讀取資料
+    NONE = 0x00, // 無效指令
 }
 
 impl TryFrom<u8> for CMD {
@@ -15,6 +16,7 @@ impl TryFrom<u8> for CMD {
         match value {
             0xaa => Ok(CMD::SEND),
             0xa8 => Ok(CMD::READ),
+            0x00 => Ok(CMD::NONE),
             _ => Err("Invalid CMD Byte"),
         }
     }
@@ -26,9 +28,10 @@ impl Display for CMD {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum Command {
+    NONE = 0x00, // 無效指令
     ACK = 0x01, // 確認收到
     NACK = 0x02, // 未確認收到
     MOTOR = 0x03, // 馬達控制
@@ -43,6 +46,7 @@ impl TryFrom<u8> for Command {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
+            0x00 => Ok(Command::NONE),
             0x01 => Ok(Command::ACK),
             0x02 => Ok(Command::NACK),
             0x03 => Ok(Command::MOTOR),
