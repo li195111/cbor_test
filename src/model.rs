@@ -108,25 +108,53 @@ impl Display for PayloadMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GigaMessage {
-    pub action: Action,
-    pub command: Command,
-    pub message: Option<HashMap<String, Value>>,
+pub struct Message {
+    pub action: Action, // 動作
+    pub command: Command, // 指令
+    pub payload_size_bytes: Vec<u8>, // Payload 大小 bytes
+    pub payload_size: u16, // Payload 大小
+    pub payload_bytes: Vec<u8>, // Payload 資料 bytes
+    pub payload: HashMap<String, Value>, // Payload 資料
+    pub crc_bytes: Vec<u8>, // CRC 校驗碼 bytes
+    pub crc: u16, // CRC 校驗碼
 }
 
 #[allow(dead_code)]
-impl GigaMessage {
-    pub fn new(action: Action, command: Command) -> Self {
-        Self { action, command, message: None }
+impl Message {
+    pub fn new(
+        action: Action,
+        command: Command,
+        payload_size_bytes: Vec<u8>,
+        payload_size: u16,
+        payload_bytes: Vec<u8>,
+        payload: HashMap<String, Value>,
+        crc_bytes: Vec<u8>,
+        crc: u16
+    ) -> Self {
+        Self {
+            action,
+            command,
+            payload_size_bytes,
+            payload_size,
+            payload_bytes,
+            payload,
+            crc_bytes,
+            crc,
+        }
     }
 }
 
-impl Default for GigaMessage {
+impl Default for Message {
     fn default() -> Self {
         Self {
             action: Action::NONE,
             command: Command::NONE,
-            message: None,
+            payload_size_bytes: Vec::new(),
+            payload_size: 0,
+            payload_bytes: Vec::new(),
+            payload: HashMap::new(),
+            crc_bytes: Vec::new(),
+            crc: 0,
         }
     }
 }
