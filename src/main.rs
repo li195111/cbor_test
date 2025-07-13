@@ -1,43 +1,17 @@
 mod model;
 
-use std::{ collections::HashMap, fmt::Display, thread::sleep, time::Duration, vec };
+use std::{ collections::HashMap, thread::sleep, time::Duration, vec };
 use anyhow::Error;
 #[allow(unused_imports)]
-use cobs::encode;
+use cobs::{ encode, decode };
 use crc::{ Crc, CRC_16_USB };
-use serde::{ Serialize, Deserialize };
 use serde_cbor::Value;
-use model::{ CMD, Command, Motion };
+use model::{ Action, Command, Motion, StateMessage };
 
 const BAUD: u32 = 460_800;
 const CRC16: Crc<u16> = Crc::<u16>::new(&CRC_16_USB);
 const START_BYTE: [u8; 1] = [0x7e]; // 開始 byte
 const MAX_DATA_LEN: usize = 1024;
-
-fn build_frame(cmd: CMD, command: Command, payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(payload.len() + 5);
-
-    frame.extend(&START_BYTE); // 開始 byte
-    // Cmd Byte, SEND: 0xAA, READ: 0xA8
-    frame.push(cmd as u8);
-    println!("Cmd Byte: {:02X?}", frame[1]);
-
-    // Command Byte, Ack=0x01, Nack=0x02, Motor=0x03, SetID=0x04, File=0x05, Sensor High=0x06, Sensor Low=0x07
-    frame.push(command as u8);
-    println!("Command Byte: {:02X?}", frame[2]);
-
-    let len = payload.len() as u16;
-    frame.extend(len.to_le_bytes());
-    println!("Payload 長度: {} {:02X?}", len, len.to_le_bytes());
-
-    frame.extend(payload);
-
-    let crc = CRC16.checksum(&frame[3..]); // 跳過 START_BYTE, Cmd Byte, Command Byte
-    frame.extend(crc.to_le_bytes()); // lo, hi
-    println!("CRC: {} {:02X?}", crc, crc.to_le_bytes());
-
-    frame
-}
 
 fn open_serial_port(
     port_name: &str,
@@ -61,52 +35,6 @@ fn open_serial_port(
                 sleep(Duration::from_secs(1));
                 continue; // 重新嘗試打開序列埠
             }
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct StateMessage {
-    status: u8,
-}
-
-impl Display for StateMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "StateMessage(status: {})", self.status)
-    }
-}
-
-#[allow(dead_code)]
-struct PayloadMessage {
-    payload: HashMap<String, Value>,
-}
-
-impl Display for PayloadMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "PayloadMessage(payload: {:?})", self.payload)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct GigaMessage {
-    cmd: CMD,
-    command: Command,
-    message: Option<HashMap<String, Value>>,
-}
-
-#[allow(dead_code)]
-impl GigaMessage {
-    pub fn new(cmd: CMD, command: Command) -> Self {
-        Self { cmd, command, message: None }
-    }
-}
-
-impl Default for GigaMessage {
-    fn default() -> Self {
-        Self {
-            cmd: CMD::NONE,
-            command: Command::NONE,
-            message: None,
         }
     }
 }
@@ -171,7 +99,7 @@ impl GigaCommunicate {
         self.messages.push("重置索引和 buffer".into());
     }
 
-    pub async fn send_motor(&mut self, cmd: CMD, command: Command) -> Result<(), Error> {
+    pub async fn send_motor(&mut self, action: Action, command: Command) -> Result<(), Error> {
         let m1 = Motion {
             name: "PMt".into(),
             id: 5,
@@ -211,16 +139,17 @@ impl GigaCommunicate {
             .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
         self.messages.push(format!("CBOR 資料: {:02X?}", payload_cbor));
         self.messages.push(format!("CBOR 長度: {}", payload_cbor.len()));
-        let frame = self.build_frame(cmd, command, &payload_cbor);
+        let (frame, _crc) = Self::build_frame(action, command, &payload_cbor);
         self.send(&frame)?;
         Ok(())
     }
 
     pub async fn listen(&mut self) -> Result<(), Error> {
-        let mut cmd = CMD::NONE; // 初始 CMD
+        let mut action = Action::NONE; // 初始 Action
         let mut command = Command::NONE; // 初始 Command
-        let mut times = 1; // 用於計算平均耗時
-        let start_time = std::time::Instant::now();
+        let mut times = 0; // 用於計算平均耗時
+        let mut start_time = std::time::Instant::now();
+        let mut elapsed_list = Vec::<Duration>::new(); // 用於存儲每次的耗時
         loop {
             let mut buf = [0u8; 1];
             let read_result = self.port.read(&mut buf);
@@ -262,9 +191,9 @@ impl GigaCommunicate {
                         self.idx += 1;
                     }
                     1 => {
-                        if let Ok(c) = CMD::try_from(self.buffer[self.idx]) {
-                            cmd = c;
-                            self.messages.push(format!("收到 Cmd Byte: {:02X?}", cmd as u8));
+                        if let Ok(c) = Action::try_from(self.buffer[self.idx]) {
+                            action = c;
+                            self.messages.push(format!("收到 Cmd Byte: {:02X?}", action as u8));
                             self.idx += 1;
                         } else {
                             self.reset().await;
@@ -325,35 +254,33 @@ impl GigaCommunicate {
                                 )
                                 .map_err(|e| anyhow::anyhow!("CBOR decode error: {}", e))?;
                             let elapsed = start_time.elapsed();
-                            self.messages.push(
-                                format!(
-                                    "平均耗時: {:.2?}, 次數: {}, 接收到 CMD: {}, Command: {}, Payload: {:?}",
-                                    elapsed / times,
-                                    times,
-                                    cmd,
-                                    command,
-                                    decoded_payload
-                                )
-                            );
-                            println!(
-                                "平均耗時: {:.2?}, 次數: {}, 接收到 CMD: {}, Command: {:10}, Payload: {:?}",
-                                elapsed / times,
+                            elapsed_list.push(elapsed);
+                            let avg_elapsed =
+                                elapsed_list.iter().sum::<Duration>() / (elapsed_list.len() as u32);
+                            let message = format!(
+                                "耗時: {:>9}, 次數: {}, 平均耗時: {:>9}, 接收到 CMD: {}, Command: {}, Payload: {:?}",
+                                format!("{:.2?}", elapsed),
                                 times,
-                                cmd,
-                                format!("{:?}", command),
+                                format!("{:.2?}", avg_elapsed),
+                                action,
+                                command,
                                 decoded_payload
                             );
+                            // 顯示接收到的 CMD 和 Command
+                            self.messages.push(message.clone());
+                            println!("{}", message);
                             if times % 100 == 0 {
-                                self.send_motor(CMD::SEND, Command::MOTOR).await?;
+                                self.send_motor(Action::SEND, Command::MOTOR).await?;
                             }
                         }
                         times += 1; // 增加次數
+                        start_time = std::time::Instant::now(); // 重置計時器
                         self.idx += 1;
                     }
                     _ => {
-                        // break;
-                        self.reset().await;
-                        continue;
+                        break;
+                        // self.reset().await;
+                        // continue;
                     }
                 }
             }
@@ -361,26 +288,22 @@ impl GigaCommunicate {
         Ok(())
     }
 
-    pub fn build_frame(&mut self, cmd: CMD, command: Command, payload: &[u8]) -> Vec<u8> {
+    pub fn build_frame(action: Action, command: Command, payload: &[u8]) -> (Vec<u8>, u16) {
         let mut frame = Vec::with_capacity(payload.len() + 7);
         // 開始 byte
         frame.extend(START_BYTE); // 1 byte
         // Cmd Byte, SEND: 0xAA, READ: 0xA8
-        frame.push(cmd as u8); // 1 byte
-        self.messages.push(format!("Cmd Byte: {:02X?}", frame[1]));
+        frame.push(action as u8); // 1 byte
         // Command Byte, Ack=0x01, Nack=0x02, Motor=0x03, SetID=0x04, File=0x05, Sensor High=0x06, Sensor Low=0x07
         frame.push(command as u8); // 1 byte
-        self.messages.push(format!("Command Byte: {:02X?}", frame[2]));
         let len = payload.len() as u16;
         frame.extend(len.to_le_bytes()); // 2 bytes
-        self.messages.push(format!("Payload 長度: {} {:02X?}", len, len.to_le_bytes()));
         frame.extend(payload); // payload 長度可變
         // 跳過 START_BYTE, Cmd Byte, Command Byte
         let crc = CRC16.checksum(&frame[3..]);
         // lo, hi  // 2 bytes
         frame.extend(crc.to_le_bytes());
-        self.messages.push(format!("CRC: {} {:02X?}", crc, crc.to_le_bytes()));
-        frame
+        (frame, crc)
     }
 
     pub fn send(&mut self, frame: &[u8]) -> Result<(), Error> {
@@ -395,11 +318,33 @@ impl GigaCommunicate {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let payload = StateMessage { status: 0 }; // 空的 payload
-    println!("Sensor PayLoad: {}", payload);
+    println!("Sensor PayLoad: {}, size: {}", payload, std::mem::size_of_val(&payload));
     let payload_cbor = serde_cbor::to_vec(&payload)?;
-    println!("Sensor PayLoad CBOR: {:02X?}", payload_cbor);
-    let frame = build_frame(CMD::READ, Command::SensorHIGH, &payload_cbor);
-    println!("Sensor Frame: {:02X?}, len: {}", frame, frame.len());
+    println!("Sensor PayLoad CBOR: {:02X?}, size: {}", payload_cbor, payload_cbor.len());
+    let (frame, _crc) = GigaCommunicate::build_frame(
+        Action::READ,
+        Command::SensorHIGH,
+        &payload_cbor
+    );
+    println!("Send Sensor Frame: {:02X?}, len: {}", frame, frame.len());
+    let mut encoded_payload_cbor = vec![0; payload_cbor.len() + 1]; // COBS 編碼後長度會增加
+    let encoded_size = encode(&payload_cbor, &mut encoded_payload_cbor);
+    println!("Encoded Sensor Frame: {:02X?}, size: {}", encoded_payload_cbor, encoded_size);
+    let (encoded_frame, crc) = GigaCommunicate::build_frame(
+        Action::SEND,
+        Command::MOTOR,
+        &encoded_payload_cbor
+    );
+    println!(
+        "Encoded Send Sensor Frame: {:02X?}, size: {}, CRC: {:02X?}",
+        encoded_frame,
+        encoded_frame.len(),
+        crc.to_le_bytes()
+    );
+
+    let mut decoded_frame = vec![0; encoded_payload_cbor.len() - 1]; // COBS 解碼後長度會減少
+    let decoded_report = decode(&encoded_payload_cbor, &mut decoded_frame)?;
+    println!("Decoded Sensor Frame: {:02X?}, size: {}", decoded_frame, decoded_report.frame_size());
 
     let args: Vec<String> = std::env::args().collect();
     let port_name = if args.len() > 1 {
@@ -410,10 +355,6 @@ async fn main() -> anyhow::Result<()> {
     println!("使用串口: {}", port_name);
     // let frame = build_frame(CMD::SEND, Command::MOTOR, &payload_cbor);
     // let dst_frame = frame.clone();
-    // let mut dst_frame = vec![0; frame.len() + 1]; // COBS 編碼後長度會增加
-    // let _encoded_size = encode(&frame, &mut dst_frame);
-    // // println!("Encoded Frame size: {}", encoded_size);
-    // println!("Encoded Frame: {:02X?}", dst_frame);
     let timeout = Duration::from_secs(1);
     // 2️⃣ 打開序列埠
     for port in serialport::available_ports()? {
@@ -429,9 +370,9 @@ async fn main() -> anyhow::Result<()> {
     // 4️⃣ 等待回覆
     println!("等待回覆...");
     giga.listen().await?;
-    for message in &giga.messages {
-        println!("{}", message);
-    }
-    println!("Buffer: {:02X?}", &giga.buffer[..giga.idx + 1]);
+    // for message in &giga.messages {
+    //     println!("{}", message);
+    // }
+    // println!("Buffer: {:02X?}", &giga.buffer[..giga.idx + 1]);
     Ok(())
 }

@@ -1,28 +1,29 @@
-use std::fmt::Display;
+use std::{ collections::HashMap, fmt::Display };
 use serde::{ Serialize, Deserialize };
+use serde_cbor::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(u8)]
-pub enum CMD {
+pub enum Action {
     SEND = 0xaa, // 發送資料
     READ = 0xa8, // 讀取資料
     NONE = 0x00, // 無效指令
 }
 
-impl TryFrom<u8> for CMD {
+impl TryFrom<u8> for Action {
     type Error = &'static str;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0xaa => Ok(CMD::SEND),
-            0xa8 => Ok(CMD::READ),
-            0x00 => Ok(CMD::NONE),
+            0xaa => Ok(Action::SEND),
+            0xa8 => Ok(Action::READ),
+            0x00 => Ok(Action::NONE),
             _ => Err("Invalid CMD Byte"),
         }
     }
 }
 
-impl Display for CMD {
+impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
@@ -82,4 +83,50 @@ pub struct Motion {
     pub amp: f32, // 電流， float
     pub temp: f32, // 溫度， float
     pub mode: u8, // 馬達運行模式，數值int8，0:default，1:位置，2:速度
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StateMessage {
+    pub status: u8,
+}
+
+impl Display for StateMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "StateMessage(status: {})", self.status)
+    }
+}
+
+#[allow(dead_code)]
+pub struct PayloadMessage {
+    pub payload: HashMap<String, Value>,
+}
+
+impl Display for PayloadMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "PayloadMessage(payload: {:?})", self.payload)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GigaMessage {
+    pub action: Action,
+    pub command: Command,
+    pub message: Option<HashMap<String, Value>>,
+}
+
+#[allow(dead_code)]
+impl GigaMessage {
+    pub fn new(action: Action, command: Command) -> Self {
+        Self { action, command, message: None }
+    }
+}
+
+impl Default for GigaMessage {
+    fn default() -> Self {
+        Self {
+            action: Action::NONE,
+            command: Command::NONE,
+            message: None,
+        }
+    }
 }
