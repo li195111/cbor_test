@@ -107,6 +107,7 @@ impl GigaCommunicate {
         self.messages.push("重置索引和 buffer".into());
     }
 
+    #[allow(dead_code)]
     pub async fn send_motor(&mut self, action: Action, command: Command) -> Result<(), Error> {
         let m1 = Motion {
             name: "PMt".into(),
@@ -295,6 +296,7 @@ impl GigaCommunicate {
         Ok(())
     }
 
+    #[allow(unreachable_code)]
     pub async fn listen(&mut self) -> Result<(), Error> {
         let mut times = 0; // 用於計算平均耗時
         let mut start_time = std::time::Instant::now();
