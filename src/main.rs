@@ -193,7 +193,12 @@ impl GigaCommunicate {
         self.messages.push(format!("CBOR 長度 COBS Frame: {}", payload_cbor.len()));
         let (cobs_frame, _cobs_size, _crc) = Self::build_cobs_frame(action, command, &payload_cbor);
         let send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
-        println!("{:30} size: {},\n\tpayload: {:?}", "Sending COBS Frame:", send_cobs_frame.len(), payload);
+        println!(
+            "{:30} size: {},\n\tpayload: {:?}",
+            "Sending COBS Frame:",
+            send_cobs_frame.len(),
+            payload
+        );
         self.send(&send_cobs_frame)?;
         Ok(())
     }
@@ -247,7 +252,7 @@ impl GigaCommunicate {
                     );
                     self.messages.push(msg.clone());
                     // println!("{}", msg);
-                    let decoded_message = GigaCommunicate::decode_message(&decoded_frame)?;
+                    let decoded_message = Self::decode_message(&decoded_frame)?;
                     let elapsed = start_time.elapsed();
                     elapsed_list.push(elapsed);
                     let avg_elapsed =
@@ -264,7 +269,7 @@ impl GigaCommunicate {
                         decoded_message.payload_size_bytes,
                         decoded_message.crc_bytes,
                         decoded_message.payload_bytes,
-                        decoded_message.payload_size,
+                        decoded_message.payload_size
                     );
                     self.messages.push(decoded_msg.clone());
                     println!("{}", decoded_msg);
