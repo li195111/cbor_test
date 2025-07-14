@@ -1,6 +1,7 @@
 mod model;
 
-use std::{ collections::HashMap, thread::sleep, time::Duration, vec };
+use std::{ collections::HashMap, io::ErrorKind, time::Duration, vec };
+use tokio::time::sleep;
 use anyhow::Error;
 #[allow(unused_imports)]
 use cobs::{ encode, decode };
@@ -13,7 +14,7 @@ const CRC16: Crc<u16> = Crc::<u16>::new(&CRC_16_USB);
 const START_BYTE: [u8; 1] = [0x7e]; // 開始 byte
 const MAX_DATA_LEN: usize = 1024;
 
-fn open_serial_port(
+async fn open_serial_port(
     port_name: &str,
     baud_rate: u32,
     timeout: Duration,
@@ -32,11 +33,18 @@ fn open_serial_port(
                 }
                 retries += 1;
                 eprintln!("無法打開序列埠 {}: {}, 正在重試第 {} 次", port_name, e, retries);
-                sleep(Duration::from_secs(1));
+                sleep(Duration::from_secs(1)).await;
                 continue; // 重新嘗試打開序列埠
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReceiveState {
+    Normal,
+    Debug,
+    CheckingDebug(usize), // 參數表示已匹配的 DEBUG 字符數量
 }
 
 struct GigaCommunicate {
@@ -55,13 +63,13 @@ struct GigaCommunicate {
 }
 
 impl GigaCommunicate {
-    pub fn new(
+    pub async fn new(
         port_name: &str,
         baud_rate: u32,
         timeout: Duration,
         max_retries: u32
     ) -> Result<Self, Error> {
-        let port = match open_serial_port(port_name, baud_rate, timeout, max_retries) {
+        let port = match open_serial_port(port_name, baud_rate, timeout, max_retries).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("無法打開序列埠 {}: {}", port_name, e);
@@ -144,175 +152,268 @@ impl GigaCommunicate {
         Ok(())
     }
 
-    async fn process_frame(
+    pub async fn send_cobs_motor(&mut self, action: Action, command: Command) -> Result<(), Error> {
+        let m1 = Motion {
+            name: "PMt".into(),
+            id: 5,
+            motion: 1,
+            speed: 100,
+            tol: 5,
+            dist: 2000,
+            angle: 100,
+            time: 5000,
+            acc: 300,
+            newid: 0,
+            volt: 12.0,
+            amp: 0.5,
+            temp: 25.0,
+            mode: 0,
+        };
+        let m2 = Motion {
+            name: "PMb".into(),
+            id: 4,
+            motion: 1,
+            speed: 100,
+            tol: 2,
+            dist: 1900,
+            angle: 60,
+            time: 4000,
+            acc: 400,
+            newid: 0,
+            volt: 12.0,
+            amp: 0.6,
+            temp: 26.0,
+            mode: 0,
+        };
+        let payload = vec![m1, m2]; // 對應外層 3 元素陣列
+        self.messages.push(format!("Payload COBS Frame: {:?}", payload));
+        let payload_cbor = serde_cbor::to_vec(&payload)?;
+        self.messages.push(format!("CBOR 資料 COBS Frame: {:02X?}", payload_cbor));
+        self.messages.push(format!("CBOR 長度 COBS Frame: {}", payload_cbor.len()));
+        let (cobs_frame, _cobs_size, _crc) = Self::build_cobs_frame(action, command, &payload_cbor);
+        let send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
+        println!("{:30} size: {},\n\tpayload: {:?}", "Sending COBS Frame:", send_cobs_frame.len(), payload);
+        self.send(&send_cobs_frame)?;
+        Ok(())
+    }
+
+    pub async fn process_normal_byte(
         &mut self,
-        times: &mut i32,
-        action: &mut Action,
-        command: &mut Command,
+        byte: u8,
+        times: &mut u32,
+        buffer_started: &mut bool,
         start_time: &mut std::time::Instant,
         elapsed_list: &mut Vec<Duration>
-    ) -> Result<u8, Error> {
-        match self.idx {
-            0 => {
-                if self.buffer[self.idx] != START_BYTE[0] {
-                    self.reset().await;
-                    return Ok(0);
-                }
-                self.messages.push(format!("收到 Start Byte: {:02X?}", self.buffer[self.idx]));
-                self.idx += 1;
-                return Ok(0); // 返回 1 表示已經處理了 Start Byte
-            }
-            1 => {
-                if let Ok(act) = Action::try_from(self.buffer[self.idx]) {
-                    *action = act;
-                    self.messages.push(format!("收到 Action Byte: {:02X?}", *action as u8));
-                    self.idx += 1;
-                    return Ok(0); // 返回 0 表示已經處理了 Action Byte
-                } else {
-                    self.reset().await;
-                    return Ok(0);
-                }
-            }
-            2 => {
-                if let Ok(cmd) = Command::try_from(self.buffer[self.idx]) {
-                    *command = cmd;
-                    self.messages.push(format!("收到 Command Byte: {:02X?}", *command as u8));
-                    self.idx += 1;
-                    return Ok(0);
-                } else {
-                    self.reset().await;
-                    return Ok(0);
-                }
-            }
-            3 => {
-                self.len_bytes[0] = self.buffer[self.idx];
-                self.idx += 1;
-                return Ok(0);
-            }
-            4 => {
-                self.len_bytes[1] = self.buffer[self.idx];
-                self.payload_size = u16::from_le_bytes(self.len_bytes) as usize;
-                if self.payload_size > MAX_DATA_LEN - 7 {
-                    return Err(anyhow::anyhow!("Payload size exceeds maximum limit"));
-                }
-                self.messages.push(format!("Payload Size: {} bytes", self.payload_size));
-                self.idx += 1;
-                return Ok(0);
-            }
-            idx if idx >= 5 && idx < 5 + self.payload_size => {
-                // 收到 payload 資料
-                self.idx += 1;
-                return Ok(0);
-            }
-            idx if idx >= 5 + self.payload_size && idx < 7 + self.payload_size => {
-                // 收到 CRC 資料
-                self.crc_bytes[self.idx - (5 + self.payload_size)] = self.buffer[self.idx];
-                if self.idx == 6 + self.payload_size {
-                    let crc = u16::from_le_bytes(self.crc_bytes);
-                    let calculated_crc = CRC16.checksum(&self.buffer[3..5 + self.payload_size]);
-                    if crc != calculated_crc {
-                        return Err(
-                            anyhow::anyhow!(
-                                "CRC mismatch: expected {:04X}, got {:04X}",
-                                calculated_crc,
-                                crc
-                            )
-                        );
-                    }
-                    self.messages.push("接收資料完成，CRC 校驗成功".into());
-                    let decoded_payload = serde_cbor
-                        ::from_slice::<HashMap<String, Value>>(
-                            &self.buffer[5..5 + self.payload_size]
-                        )
-                        .map_err(|e| anyhow::anyhow!("CBOR decode error: {}", e))?;
+    ) -> Result<(), anyhow::Error> {
+        self.buffer[self.idx] = byte;
+        // println!(
+        //     "times: {} idx: {:3} Buffer: {:02X?}",
+        //     times,
+        //     format!("{}", self.idx),
+        //     &self.buffer[..self.idx + 1]
+        // );
+        if self.buffer[self.idx] == 0x0d || self.buffer[self.idx] == 0x0a {
+            // 忽略 CR 和 LF 字符
+            self.buffer[self.idx] = 0x00; // 將 CR 和 LF 替換為 0x00
+        }
+
+        match self.buffer[self.idx] {
+            0x00 => {
+                if !*buffer_started {
+                    self.messages.push("開始接收資料...".into());
+                    *buffer_started = true; // 標記已經開始接收資料
+                } else if self.buffer[0..self.idx].len() > 0 {
+                    let cobs_buffer = &self.buffer[0..self.idx];
+                    let msg = format!(
+                        "{:30} {:02X?}, size: {}",
+                        "Received COBS Frame:",
+                        cobs_buffer,
+                        cobs_buffer.len()
+                    );
+                    self.messages.push(msg.clone());
+                    // println!("{}", msg);
+                    // 處理 COBS Frame
+                    let mut decoded_frame = vec![0; cobs_buffer.len() - 1]; // COBS 解碼後長度會減少
+                    let decoded_report = decode(cobs_buffer, &mut decoded_frame).map_err(|e| {
+                        eprintln!("COBS decode error: {}", e);
+                        anyhow::anyhow!("COBS decode error: {}", e)
+                    })?;
+                    let msg = format!(
+                        "{:30} {:02X?}, size: {}",
+                        "Decoded COBS Frame:",
+                        decoded_frame,
+                        decoded_report.frame_size()
+                    );
+                    self.messages.push(msg.clone());
+                    // println!("{}", msg);
+                    let decoded_message = GigaCommunicate::decode_message(&decoded_frame)?;
                     let elapsed = start_time.elapsed();
                     elapsed_list.push(elapsed);
                     let avg_elapsed =
                         elapsed_list.iter().sum::<Duration>() / (elapsed_list.len() as u32);
-                    let message = format!(
-                        "耗時: {:>9}, 次數: {}, 平均耗時: {:>9}, 接收到 CMD: {}, Command: {}, Payload: {:?}",
+                    let decoded_msg = format!(
+                        "耗時: {:>9}, 次數: {}, 平均耗時: {:>9} Action: {:?}, Command: {:?} {:?}\n\t{:30} {:02X?}, CRC bytes: {:02X?},\n\tPayload Bytes: {:02X?}, size: {}",
                         format!("{:.2?}", elapsed),
                         times,
                         format!("{:.2?}", avg_elapsed),
-                        action,
-                        command,
-                        decoded_payload
+                        decoded_message.action,
+                        decoded_message.command,
+                        decoded_message.payload,
+                        "Payload Size bytes:",
+                        decoded_message.payload_size_bytes,
+                        decoded_message.crc_bytes,
+                        decoded_message.payload_bytes,
+                        decoded_message.payload_size,
                     );
-                    // 顯示接收到的 CMD 和 Command
-                    self.messages.push(message.clone());
-                    println!("{}", message);
-                    if *times % 100 == 0 {
-                        self.send_motor(Action::SEND, Command::MOTOR).await?;
+                    self.messages.push(decoded_msg.clone());
+                    println!("{}", decoded_msg);
+                    // if decoded_message.command != Command::SensorHIGH {
+                    //     println!("{}", decoded_msg);
+                    // }
+                    *buffer_started = false; // 重置標記
+                    if *times % 1 == 0 {
+                        self.send_cobs_motor(Action::SEND, Command::MOTOR).await?;
                     }
+                    if *times > 10000 {
+                        return Ok(()); // 停止循環
+                    }
+                    *times += 1;
+                    *start_time = std::time::Instant::now(); // 重置計時器
                 }
-                *times += 1; // 增加次數
-                *start_time = std::time::Instant::now(); // 重置計時器
-                self.idx += 1;
-                return Ok(0);
+                self.reset().await;
             }
             _ => {
-                self.reset().await;
-                return Ok(0);
-                // return Err(anyhow::anyhow!("Unexpected index: {}", self.idx));
-                // continue;
+                self.idx += 1;
             }
         }
+
+        if self.idx >= MAX_DATA_LEN {
+            self.messages.push("Buffer overflow, resetting...".into());
+            self.reset().await;
+        }
+
+        Ok(())
     }
 
     pub async fn listen(&mut self) -> Result<(), Error> {
-        let mut action = Action::NONE; // 初始 Action
-        let mut command = Command::NONE; // 初始 Command
         let mut times = 0; // 用於計算平均耗時
         let mut start_time = std::time::Instant::now();
         let mut elapsed_list = Vec::<Duration>::new(); // 用於存儲每次的耗時
+        let mut buffer_started = false; // 標記是否已經開始接收資料
+
+        let debug_sequence = b"[DEBUG]";
+        let mut receive_state = ReceiveState::Normal;
+        let mut debug_output = String::new();
+
         loop {
             let mut buf = [0u8; 1];
             let read_result = self.port.read(&mut buf);
-            if read_result.is_err() {
-                self.messages.push("讀取串口資料失敗，可能是串口已關閉或發生錯誤".into());
-                // 嘗試關閉並重新打開串口
-                self.messages.push(format!("關閉序列埠: {}", self.port_name));
-                sleep(Duration::from_secs(1)); // 等待 1 秒鐘
-                // 嘗試重新打開串口
-                self.port = match
-                    open_serial_port(
-                        &self.port_name,
-                        self.baud_rate,
-                        self.timeout,
-                        self.max_retries
-                    )
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("無法重新打開序列埠 {}: {}", self.port_name, e);
-                        return Err(anyhow::anyhow!("無法重新打開序列埠"));
+
+            match read_result {
+                Ok(_) => {
+                    let received_byte = buf[0];
+                    match receive_state {
+                        ReceiveState::Normal => {
+                            if received_byte == debug_sequence[0] {
+                                receive_state = ReceiveState::CheckingDebug(1);
+                            } else {
+                                self.process_normal_byte(
+                                    received_byte,
+                                    &mut times,
+                                    &mut buffer_started,
+                                    &mut start_time,
+                                    &mut elapsed_list
+                                ).await?;
+                            }
+                        }
+                        ReceiveState::CheckingDebug(match_count) => {
+                            if
+                                match_count < debug_sequence.len() &&
+                                received_byte == debug_sequence[match_count]
+                            {
+                                if match_count + 1 == debug_sequence.len() {
+                                    // 完整匹配到 DEBUG
+                                    receive_state = ReceiveState::Debug;
+                                    // println!("進入 DEBUG 狀態");
+                                } else {
+                                    receive_state = ReceiveState::CheckingDebug(match_count + 1);
+                                }
+                            } else {
+                                // 匹配失敗，回到正常模式並處理之前的字符
+                                receive_state = ReceiveState::Normal;
+                                // 處理之前的字符
+                                for i in 0..match_count {
+                                    self.process_normal_byte(
+                                        debug_sequence[i],
+                                        &mut times,
+                                        &mut buffer_started,
+                                        &mut start_time,
+                                        &mut elapsed_list
+                                    ).await?;
+                                }
+                                // 處理當前字符
+                                self.process_normal_byte(
+                                    received_byte,
+                                    &mut times,
+                                    &mut buffer_started,
+                                    &mut start_time,
+                                    &mut elapsed_list
+                                ).await?;
+                            }
+                        }
+                        ReceiveState::Debug => {
+                            if received_byte == b'\n' || received_byte == b'\r' {
+                                if debug_output.contains("CBOR Motor Receiver Ready") {
+                                    // self.send_cobs_motor(Action::READ, Command::MOTOR).await?;
+                                }
+                                println!("Giga: {}", debug_output);
+                                debug_output.clear();
+                                receive_state = ReceiveState::Normal;
+                            } else if received_byte == 0x1b {
+                                // ESC 鍵退出 DEBUG 模式
+                                receive_state = ReceiveState::Normal;
+                                // println!("離開 DEBUG 模式");
+                                debug_output.clear();
+                            } else if received_byte >= 0x20 && received_byte <= 0x7e {
+                                debug_output.push(received_byte as char);
+                            }
+                        }
                     }
-                };
-                self.messages.push(format!("重新打開序列埠: {}", self.port_name));
-                sleep(Duration::from_secs(1)); // 等待 1 秒鐘
-                continue; // 重新開始循環
-            } else if read_result.is_ok() {
-                self.buffer[self.idx] = buf[0];
-                println!("Buffer: {:02X?}, idx: {}", &self.buffer[..self.idx + 1], self.idx);
-                // if
-                //     let Ok(ret) = self.process_frame(
-                //         &mut times,
-                //         &mut action,
-                //         &mut command,
-                //         &mut start_time,
-                //         &mut elapsed_list
-                //     ).await
-                // {
-                //     if ret != 0 {
-                //         break;
-                //     }
-                //     continue;
-                // }
-                self.idx += 1;
-                if self.idx >= MAX_DATA_LEN {
-                    self.messages.push("Buffer overflow, resetting...".into());
-                    self.reset().await;
-                    continue;
+                }
+                Err(e) => {
+                    match e.kind() {
+                        ErrorKind::TimedOut => {
+                            // timeout 正常
+                            println!("讀取串口資料超時，繼續等待...");
+                            continue;
+                        }
+                        _ => {
+                            self.messages.push(
+                                "讀取串口資料失敗，可能是串口已關閉或發生錯誤".into()
+                            );
+                            // 嘗試關閉並重新打開串口
+                            self.messages.push(format!("關閉序列埠: {}", self.port_name));
+                            sleep(Duration::from_secs(1)).await; // 等待 1 秒鐘
+                            // 嘗試重新打開串口
+                            self.port = match
+                                open_serial_port(
+                                    &self.port_name,
+                                    self.baud_rate,
+                                    self.timeout,
+                                    self.max_retries
+                                ).await
+                            {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    eprintln!("無法重新打開序列埠 {}: {}", self.port_name, e);
+                                    return Err(anyhow::anyhow!("無法重新打開序列埠"));
+                                }
+                            };
+                            self.messages.push(format!("重新打開序列埠: {}", self.port_name));
+                            sleep(Duration::from_secs(1)).await; // 等待 1 秒鐘
+                            continue; // 重新開始循環
+                        }
+                    }
                 }
             }
         }
@@ -503,11 +604,11 @@ async fn main() -> anyhow::Result<()> {
         println!("Found port: {}", port.port_name);
     }
     let max_retries = 5; // 最大重試次數
-    let mut giga = GigaCommunicate::new(port_name, BAUD, timeout, max_retries)?;
+    let mut giga = GigaCommunicate::new(port_name, BAUD, timeout, max_retries).await?;
 
     println!("成功打開序列埠: {}", port_name);
     // println!("等待 1 秒鐘...");
-    // sleep(Duration::from_secs(1));
+    // giga.send_cobs_motor(Action::SEND, Command::MOTOR).await?;
 
     // 4️⃣ 等待回覆
     println!("等待回覆...");
