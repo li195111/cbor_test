@@ -3,11 +3,14 @@ mod model;
 use std::{ collections::HashMap, io::ErrorKind, time::Duration, vec };
 use tokio::time::sleep;
 use anyhow::Error;
-#[allow(unused_imports)]
 use cobs::{ encode, decode };
 use crc::{ Crc, CRC_16_USB };
 use serde_cbor::Value;
 use model::{ Action, Command, Motion, StateMessage, Message };
+#[allow(unused_imports)]
+use tracing::{ info, error, debug, warn };
+use tracing_subscriber::{ fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt };
+use tracing_appender::rolling;
 
 const BAUD: u32 = 460_800;
 const CRC16: Crc<u16> = Crc::<u16>::new(&CRC_16_USB);
@@ -52,8 +55,8 @@ struct GigaCommunicate {
     baud_rate: u32,
     timeout: Duration,
     max_retries: u32,
+    pub debug: bool,
     port: Box<dyn serialport::SerialPort>,
-    pub messages: Vec<String>,
 
     pub buffer: [u8; MAX_DATA_LEN],
     pub idx: usize,
@@ -67,7 +70,8 @@ impl GigaCommunicate {
         port_name: &str,
         baud_rate: u32,
         timeout: Duration,
-        max_retries: u32
+        max_retries: u32,
+        debug: bool
     ) -> Result<Self, Error> {
         let port = match open_serial_port(port_name, baud_rate, timeout, max_retries).await {
             Ok(p) => p,
@@ -81,30 +85,23 @@ impl GigaCommunicate {
             baud_rate,
             timeout,
             max_retries,
+            debug,
             port,
             buffer: [0u8; MAX_DATA_LEN],
             idx: 0,
             len_bytes: [0u8; 2],
             crc_bytes: [0u8; 2],
             payload_size: 0,
-            messages: Vec::new(),
         })
     }
 
     pub async fn reset(&mut self) {
-        // if self.idx > 3 {
-        //     println!("重設: idx: {}, buffer: {:02X?}", self.idx, &self.buffer[..self.idx + 1]);
-        //     for message in &self.messages {
-        //         println!("\t{}", message);
-        //     }
-        // }
         self.buffer = [0u8; MAX_DATA_LEN];
         self.idx = 0;
         self.len_bytes = [0u8; 2];
         self.crc_bytes = [0u8; 2];
         self.payload_size = 0;
-        self.messages.clear();
-        self.messages.push("重置索引和 buffer".into());
+        debug!("重置索引和 buffer");
     }
 
     #[allow(dead_code)]
@@ -142,12 +139,12 @@ impl GigaCommunicate {
             mode: 0,
         };
         let payload: Vec<Motion> = vec![m1, m2]; // 對應外層 3 元素陣列
-        self.messages.push(format!("Payload: {:?}", payload));
+        debug!("Payload: {:?}", payload);
         let payload_cbor: Vec<u8> = serde_cbor
             ::to_vec(&payload)
             .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
-        self.messages.push(format!("CBOR 資料: {:02X?}", payload_cbor));
-        self.messages.push(format!("CBOR 長度: {}", payload_cbor.len()));
+        debug!("CBOR 資料: {:02X?}", payload_cbor);
+        debug!("CBOR 長度: {}", payload_cbor.len());
         let (frame, _crc) = Self::build_frame(action, command, &payload_cbor);
         self.send(&frame)?;
         Ok(())
@@ -187,13 +184,13 @@ impl GigaCommunicate {
             mode: 0,
         };
         let payload = vec![m1, m2]; // 對應外層 3 元素陣列
-        self.messages.push(format!("Payload COBS Frame: {:?}", payload));
+        debug!("Payload COBS Frame: {:?}", payload);
         let payload_cbor = serde_cbor::to_vec(&payload)?;
-        self.messages.push(format!("CBOR 資料 COBS Frame: {:02X?}", payload_cbor));
-        self.messages.push(format!("CBOR 長度 COBS Frame: {}", payload_cbor.len()));
+        debug!("CBOR 資料 COBS Frame: {:02X?}", payload_cbor);
+        debug!("CBOR 長度 COBS Frame: {}", payload_cbor.len());
         let (cobs_frame, _cobs_size, _crc) = Self::build_cobs_frame(action, command, &payload_cbor);
         let send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
-        println!(
+        info!(
             "{:30} size: {},\n\tpayload: {:?}",
             "Sending COBS Frame:",
             send_cobs_frame.len(),
@@ -212,12 +209,6 @@ impl GigaCommunicate {
         elapsed_list: &mut Vec<Duration>
     ) -> Result<(), anyhow::Error> {
         self.buffer[self.idx] = byte;
-        // println!(
-        //     "times: {} idx: {:3} Buffer: {:02X?}",
-        //     times,
-        //     format!("{}", self.idx),
-        //     &self.buffer[..self.idx + 1]
-        // );
         if self.buffer[self.idx] == 0x0d || self.buffer[self.idx] == 0x0a {
             // 忽略 CR 和 LF 字符
             self.buffer[self.idx] = 0x00; // 將 CR 和 LF 替換為 0x00
@@ -226,7 +217,7 @@ impl GigaCommunicate {
         match self.buffer[self.idx] {
             0x00 => {
                 if !*buffer_started {
-                    self.messages.push("開始接收資料...".into());
+                    info!("開始接收資料...");
                     *buffer_started = true; // 標記已經開始接收資料
                 } else if self.buffer[0..self.idx].len() > 0 {
                     let cobs_buffer = &self.buffer[0..self.idx];
@@ -236,8 +227,7 @@ impl GigaCommunicate {
                         cobs_buffer,
                         cobs_buffer.len()
                     );
-                    self.messages.push(msg.clone());
-                    // println!("{}", msg);
+                    info!("{}", msg);
                     // 處理 COBS Frame
                     let mut decoded_frame = vec![0; cobs_buffer.len() - 1]; // COBS 解碼後長度會減少
                     let decoded_report = decode(cobs_buffer, &mut decoded_frame).map_err(|e| {
@@ -250,8 +240,7 @@ impl GigaCommunicate {
                         decoded_frame,
                         decoded_report.frame_size()
                     );
-                    self.messages.push(msg.clone());
-                    // println!("{}", msg);
+                    info!("{}", msg);
                     let decoded_message = Self::decode_message(&decoded_frame)?;
                     let elapsed = start_time.elapsed();
                     elapsed_list.push(elapsed);
@@ -271,10 +260,9 @@ impl GigaCommunicate {
                         decoded_message.payload_bytes,
                         decoded_message.payload_size
                     );
-                    self.messages.push(decoded_msg.clone());
-                    println!("{}", decoded_msg);
+                    info!("{}", decoded_msg);
                     // if decoded_message.command != Command::SensorHIGH {
-                    //     println!("{}", decoded_msg);
+                    //     debug!("{}", decoded_msg);
                     // }
                     *buffer_started = false; // 重置標記
                     if *times % 1 == 0 {
@@ -294,7 +282,7 @@ impl GigaCommunicate {
         }
 
         if self.idx >= MAX_DATA_LEN {
-            self.messages.push("Buffer overflow, resetting...".into());
+            debug!("Buffer overflow, resetting...");
             self.reset().await;
         }
 
@@ -319,6 +307,9 @@ impl GigaCommunicate {
             match read_result {
                 Ok(_) => {
                     let received_byte = buf[0];
+                    if self.debug {
+                        debug!("Received byte: {:02X}", received_byte);
+                    }
                     match receive_state {
                         ReceiveState::Normal => {
                             if received_byte == debug_sequence[0] {
@@ -341,7 +332,7 @@ impl GigaCommunicate {
                                 if match_count + 1 == debug_sequence.len() {
                                     // 完整匹配到 DEBUG
                                     receive_state = ReceiveState::Debug;
-                                    // println!("進入 DEBUG 狀態");
+                                    // info!("進入 DEBUG 狀態");
                                 } else {
                                     receive_state = ReceiveState::CheckingDebug(match_count + 1);
                                 }
@@ -373,13 +364,13 @@ impl GigaCommunicate {
                                 if debug_output.contains("CBOR Motor Receiver Ready") {
                                     // self.send_cobs_motor(Action::READ, Command::MOTOR).await?;
                                 }
-                                println!("Giga: {}", debug_output);
+                                debug!("Giga: {}", debug_output);
                                 debug_output.clear();
                                 receive_state = ReceiveState::Normal;
                             } else if received_byte == 0x1b {
                                 // ESC 鍵退出 DEBUG 模式
                                 receive_state = ReceiveState::Normal;
-                                // println!("離開 DEBUG 模式");
+                                // info!("離開 DEBUG 模式");
                                 debug_output.clear();
                             } else if received_byte >= 0x20 && received_byte <= 0x7e {
                                 debug_output.push(received_byte as char);
@@ -391,15 +382,13 @@ impl GigaCommunicate {
                     match e.kind() {
                         ErrorKind::TimedOut => {
                             // timeout 正常
-                            println!("讀取串口資料超時，繼續等待...");
+                            info!("讀取串口資料超時，繼續等待...");
                             continue;
                         }
                         _ => {
-                            self.messages.push(
-                                "讀取串口資料失敗，可能是串口已關閉或發生錯誤".into()
-                            );
+                            debug!("讀取串口資料失敗，可能是串口已關閉或發生錯誤");
                             // 嘗試關閉並重新打開串口
-                            self.messages.push(format!("關閉序列埠: {}", self.port_name));
+                            debug!("關閉序列埠: {}", self.port_name);
                             sleep(Duration::from_secs(1)).await; // 等待 1 秒鐘
                             // 嘗試重新打開串口
                             self.port = match
@@ -412,11 +401,16 @@ impl GigaCommunicate {
                             {
                                 Ok(p) => p,
                                 Err(e) => {
-                                    eprintln!("無法重新打開序列埠 {}: {}", self.port_name, e);
-                                    return Err(anyhow::anyhow!("無法重新打開序列埠"));
+                                    let msg = format!(
+                                        "無法重新打開序列埠 {}: {}",
+                                        self.port_name,
+                                        e
+                                    );
+                                    error!("{}", msg);
+                                    return Err(anyhow::anyhow!(msg));
                                 }
                             };
-                            self.messages.push(format!("重新打開序列埠: {}", self.port_name));
+                            debug!("重新打開序列埠: {}", self.port_name);
                             sleep(Duration::from_secs(1)).await; // 等待 1 秒鐘
                             continue; // 重新開始循環
                         }
@@ -477,10 +471,9 @@ impl GigaCommunicate {
         let frame_size = frame.len();
         if frame_size < 6 {
             // 最小長度為 6 bytes, 包含 Action Byte, Command Byte, Length, CRC
-            eprintln!("Frame too short: expected at least 6 bytes, got {}", frame_size);
-            return Err(
-                anyhow::anyhow!("Frame too short: expected at least 6 bytes, got {}", frame_size)
-            );
+            let msg = format!("Frame too short: expected at least 6 bytes, got {}", frame_size);
+            error!("{}", msg);
+            return Err(anyhow::anyhow!("{}", msg));
         }
         // 1 byte, Action Byte
         let action = Action::try_from(frame[0]).unwrap_or(Action::NONE);
@@ -491,16 +484,19 @@ impl GigaCommunicate {
         let payload_size = u16::from_le_bytes(payload_size_bytes);
         // n bytes, Payload
         let payload_bytes = &frame[4..4 + (payload_size as usize)];
-        let payload = serde_cbor
-            ::from_slice::<HashMap<String, Value>>(payload_bytes)
-            .map_err(|e| anyhow::anyhow!("CBOR decode error: {}", e))?;
+        let payload = serde_cbor::from_slice::<HashMap<String, Value>>(payload_bytes).map_err(|e| {
+            let msg = format!("CBOR decode error: {}", e);
+            error!("{}", msg);
+            anyhow::anyhow!("{}", msg)
+        })?;
         // 2 bytes, CRC
         let crc_bytes = &frame[frame_size - 2..frame_size];
         let crc = u16::from_le_bytes(crc_bytes.try_into().unwrap());
         let calc_crc = CRC16.checksum(&frame[2..frame_size - 2]);
         if crc != calc_crc {
-            eprintln!("CRC mismatch: expected {:04X}, got {:04X}", calc_crc, crc);
-            return Err(anyhow::anyhow!("CRC mismatch: expected {:04X}, got {:04X}", calc_crc, crc));
+            let msg = format!("CRC mismatch: expected {:04X}, got {:04X}", calc_crc, crc);
+            error!("{}", msg);
+            return Err(anyhow::anyhow!("{}", msg));
         }
         Ok(Message {
             action,
@@ -515,23 +511,88 @@ impl GigaCommunicate {
     }
 
     pub fn send(&mut self, frame: &[u8]) -> Result<(), Error> {
-        self.messages.push(format!("傳送資料: {:02X?}", frame));
+        debug!("傳送資料: {:02X?}", frame);
         self.port.write_all(frame)?;
         self.port.flush()?;
-        self.messages.push("資料傳送成功".into());
+        debug!("資料傳送成功");
         Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let kwargs: HashMap<String, String> = args
+        .iter()
+        .skip(2)
+        .filter_map(|arg| {
+            let mut parts = arg.splitn(2, '=');
+            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                Some((key.to_string().to_lowercase(), value.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let port_name = if args.len() > 1 {
+        &args[1]
+    } else {
+        "COM5" // 默認端口
+    };
+    let debug_mode = kwargs
+        .get_key_value("debug")
+        .map_or(false, |(_, v)| (v == "true" || v == "1"));
+
+    let timeout = kwargs
+        .get("timeout")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::from_secs(1), Duration::from_secs);
+
+    // let proj_exe = std::env::current_exe().unwrap();
+    // let proj_root_dir = proj_exe.parent().unwrap();
+    // let log_dir = proj_root_dir.join("logs");
+    let dir_name = "logs";
+    let file_name = "cbor_test.log";
+    // 1. 準備檔案 appender（logs/YYYY-MM-DD.log）
+    let file_app = rolling::daily(dir_name, file_name);
+    let (file_writer, guard) = tracing_appender::non_blocking(file_app);
+
+    // 2. 建 stdout layer
+    let stdout_layer = fmt
+        ::layer()
+        .with_writer(std::io::stdout) // 終端輸出
+        .with_target(false) // 不印 module 名
+        .with_ansi(true); // 顯示顏色
+
+    // 3. 建 file layer
+    let file_layer = fmt
+        ::layer()
+        .with_writer(file_writer) // 背景 thread 寫檔
+        .with_ansi(false); // 檔案不要色碼
+
+    // 4. 裝上去 & init
+    tracing_subscriber
+        ::registry()
+        .with(stdout_layer)
+        .with(file_layer)
+        .with(EnvFilter::new(if debug_mode { "debug" } else { "info" })) // 或 EnvFilter::from_default_env()
+        .init();
+
+    // 5. **保留 guard**（否則 app 結束前可能 flush 不到）
+    let _guard = guard;
+
+    info!("CBOR Test 開始 ================================================================");
+    info!("使用串口: {}", port_name);
+    info!("DEBUG 模式: {}", debug_mode);
+    info!("超時設定: {:?}", timeout);
+
     // payload
     let payload = StateMessage { status: 0 };
-    println!("{:30} {}, size: {}", "PayLoad:", payload, std::mem::size_of_val(&payload));
+    info!("{:30} {}, size: {}", "PayLoad:", payload, std::mem::size_of_val(&payload));
 
     // 將 payload 序列化為 CBOR 格式
     let payload_cbor = serde_cbor::to_vec(&payload)?;
-    println!("{:30} {:02X?}, size: {}", "PayLoad CBOR:", payload_cbor, payload_cbor.len());
+    info!("{:30} {:02X?}, size: {}", "PayLoad CBOR:", payload_cbor, payload_cbor.len());
 
     // 建立要傳送的 frame
     let (frame, _crc) = GigaCommunicate::build_frame(
@@ -539,7 +600,7 @@ async fn main() -> anyhow::Result<()> {
         Command::SensorHIGH,
         &payload_cbor
     );
-    println!(
+    info!(
         "{:30} {:02X?}, len: {}, {:02X?}, CRC: {:02X?}",
         "Send CBOR without COBS Frame:",
         frame,
@@ -554,7 +615,7 @@ async fn main() -> anyhow::Result<()> {
         Command::MOTOR,
         &payload_cbor
     );
-    println!(
+    info!(
         "{:30} {:02X?}, size: {}, {:02X?}, CRC: {:02X?}",
         "CBOR with COBS Frame:",
         cobs_frame,
@@ -567,12 +628,12 @@ async fn main() -> anyhow::Result<()> {
     // 這裡假設 START_BYTE 為 0x00，實際應根據協議定義
     let send_frame = vec![0x00].into_iter().chain(cobs_frame.clone()).collect::<Vec<u8>>();
     let send_frame_size = send_frame.len();
-    println!("{:30} {:02X?}, size: {}", "Send CBOR with COBS Frame:", send_frame, send_frame_size);
+    info!("{:30} {:02X?}, size: {}", "Send CBOR with COBS Frame:", send_frame, send_frame_size);
 
     // 模擬 COBS 解碼
     let mut decoded_frame = vec![0; _cobs_size - 1]; // COBS 解碼後長度會減少
     let decoded_report = decode(&cobs_frame, &mut decoded_frame)?;
-    println!(
+    info!(
         "{:30} {:02X?}, size: {}",
         "Decoded COBS Frame:",
         decoded_frame,
@@ -580,7 +641,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let decoded_message = GigaCommunicate::decode_message(&decoded_frame)?;
-    println!(
+    info!(
         "{:30} Action: {:?}, Command: {:?}, Payload Size bytes: {:02X?}, CRC bytes: {:02X?}",
         "Decoded Message:",
         decoded_message.action,
@@ -588,41 +649,29 @@ async fn main() -> anyhow::Result<()> {
         decoded_message.payload_size_bytes,
         decoded_message.crc_bytes
     );
-    println!(
+    info!(
         "{:30} {:02X?}, size: {}",
         "Decoded Payload Bytes:",
         decoded_message.payload_bytes,
         decoded_message.payload_size
     );
-    println!("{:30} {:?}", "Decoded Payload:", decoded_message.payload);
+    info!("{:30} {:?}", "Decoded Payload:", decoded_message.payload);
 
-    let args: Vec<String> = std::env::args().collect();
-    let port_name = if args.len() > 1 {
-        &args[1]
-    } else {
-        "COM5" // 默認端口
-    };
-    println!("使用串口: {}", port_name);
     // let frame = build_frame(CMD::SEND, Command::MOTOR, &payload_cbor);
     // let dst_frame = frame.clone();
-    let timeout = Duration::from_secs(1);
     // 2️⃣ 打開序列埠
     for port in serialport::available_ports()? {
-        println!("Found port: {}", port.port_name);
+        info!("\tFound port: {}", port.port_name);
     }
     let max_retries = 5; // 最大重試次數
-    let mut giga = GigaCommunicate::new(port_name, BAUD, timeout, max_retries).await?;
+    let mut giga = GigaCommunicate::new(port_name, BAUD, timeout, max_retries, debug_mode).await?;
 
-    println!("成功打開序列埠: {}", port_name);
-    // println!("等待 1 秒鐘...");
+    info!("成功打開序列埠: {}", port_name);
+    // info!("等待 1 秒鐘...");
     // giga.send_cobs_motor(Action::SEND, Command::MOTOR).await?;
 
     // 4️⃣ 等待回覆
-    println!("等待回覆...");
+    info!("等待回覆...");
     giga.listen().await?;
-    // for message in &giga.messages {
-    //     println!("{}", message);
-    // }
-    // println!("Buffer: {:02X?}", &giga.buffer[..giga.idx + 1]);
     Ok(())
 }
