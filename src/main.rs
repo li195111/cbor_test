@@ -1,7 +1,7 @@
 mod model;
 
 use std::{ collections::HashMap, io::ErrorKind, time::Duration, vec };
-use tokio::time::sleep;
+// use tokio::time::sleep;
 use anyhow::Error;
 use cobs::{ encode, decode };
 use crc::{ Crc, CRC_16_USB };
@@ -36,7 +36,7 @@ async fn open_serial_port(
                 }
                 retries += 1;
                 eprintln!("無法打開序列埠 {}: {}, 正在重試第 {} 次", port_name, e, retries);
-                sleep(Duration::from_secs(1)).await;
+                // sleep(Duration::from_secs(1)).await;
                 continue; // 重新嘗試打開序列埠
             }
         }
@@ -55,14 +55,21 @@ struct GigaCommunicate {
     baud_rate: u32,
     timeout: Duration,
     max_retries: u32,
-    pub debug: bool,
+    debug: bool,
+    show_byte: bool,
+    sensor_monitor: bool, // 是否啟用 Sensor Monitor 模式
     port: Box<dyn serialport::SerialPort>,
 
-    pub buffer: [u8; MAX_DATA_LEN],
-    pub idx: usize,
-    pub len_bytes: [u8; 2],
-    pub crc_bytes: [u8; 2],
-    pub payload_size: usize,
+    buffer: [u8; MAX_DATA_LEN],
+    buffer_receive_start_time: std::time::Instant,
+    buffer_process_start_time: std::time::Instant,
+    idx: usize,
+    len_bytes: [u8; 2],
+    crc_bytes: [u8; 2],
+    payload_size: usize,
+
+    // Sensor State
+    is_triggered: bool, // 是否已觸發
 }
 
 impl GigaCommunicate {
@@ -71,7 +78,9 @@ impl GigaCommunicate {
         baud_rate: u32,
         timeout: Duration,
         max_retries: u32,
-        debug: bool
+        debug: bool,
+        show_byte: bool,
+        sensor_monitor: bool
     ) -> Result<Self, Error> {
         let port = match open_serial_port(port_name, baud_rate, timeout, max_retries).await {
             Ok(p) => p,
@@ -86,12 +95,17 @@ impl GigaCommunicate {
             timeout,
             max_retries,
             debug,
+            show_byte,
+            sensor_monitor,
             port,
             buffer: [0u8; MAX_DATA_LEN],
+            buffer_receive_start_time: std::time::Instant::now(),
+            buffer_process_start_time: std::time::Instant::now(),
             idx: 0,
             len_bytes: [0u8; 2],
             crc_bytes: [0u8; 2],
             payload_size: 0,
+            is_triggered: false, // 初始狀態未觸發
         })
     }
 
@@ -184,42 +198,56 @@ impl GigaCommunicate {
             mode: 0,
         };
         let payload = vec![m1, m2]; // 對應外層 3 元素陣列
-        debug!("Payload COBS Frame: {:?}", payload);
+        debug!("{:30} {:?}", "Payload COBS Frame:", payload);
         let payload_cbor = serde_cbor::to_vec(&payload)?;
-        debug!("CBOR 資料 COBS Frame: {:02X?}", payload_cbor);
-        debug!("CBOR 長度 COBS Frame: {}", payload_cbor.len());
+        debug!("{:30} {:02X?}", "CBOR 資料 COBS Frame:", payload_cbor);
+        debug!("{:30} {}", "CBOR 長度 COBS Frame:", payload_cbor.len());
         let (cobs_frame, _cobs_size, _crc) = Self::build_cobs_frame(action, command, &payload_cbor);
-        let send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
+        let mut send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
+        send_cobs_frame.push(0x00); // 添加結束 byte
+        self.send(&send_cobs_frame)?;
         info!(
-            "{:30} size: {},\n\tpayload: {:?}",
+            "{:30} size: {}, Payload: {:?}",
             "Sending COBS Frame:",
             send_cobs_frame.len(),
             payload
         );
-        self.send(&send_cobs_frame)?;
         Ok(())
     }
 
     pub async fn process_normal_byte(
         &mut self,
         byte: u8,
-        times: &mut u32,
         buffer_started: &mut bool,
-        start_time: &mut std::time::Instant,
-        elapsed_list: &mut Vec<Duration>
+        receive_buf_elapsed_list: &mut Vec<Duration>,
+        process_buf_elapsed_list: &mut Vec<Duration>
     ) -> Result<(), anyhow::Error> {
         self.buffer[self.idx] = byte;
         if self.buffer[self.idx] == 0x0d || self.buffer[self.idx] == 0x0a {
             // 忽略 CR 和 LF 字符
-            self.buffer[self.idx] = 0x00; // 將 CR 和 LF 替換為 0x00
+            // self.buffer[self.idx] = 0x00; // 將 CR 和 LF 替換為 0x00
         }
-
         match self.buffer[self.idx] {
             0x00 => {
                 if !*buffer_started {
+                    // 第一個 0x00 字節表示開始接收資料
                     info!("開始接收資料...");
+                    self.buffer_receive_start_time = std::time::Instant::now();
                     *buffer_started = true; // 標記已經開始接收資料
                 } else if self.buffer[0..self.idx].len() > 0 {
+                    // 第二個 0x00 字節表示結束接收資料
+                    let receive_elapsed = self.buffer_receive_start_time.elapsed();
+                    receive_buf_elapsed_list.push(receive_elapsed);
+                    if receive_buf_elapsed_list.len() > 100 {
+                        receive_buf_elapsed_list.remove(0); // 保持列表長度不超過 100
+                    }
+                    // 平均接收資料耗時
+                    let avg_receive_elapsed =
+                        receive_buf_elapsed_list.iter().sum::<Duration>() /
+                        (receive_buf_elapsed_list.len() as u32);
+
+                    // 開始處理資料
+                    self.buffer_process_start_time = std::time::Instant::now();
                     let cobs_buffer = &self.buffer[0..self.idx];
                     let msg = format!(
                         "{:30} {:02X?}, size: {}",
@@ -227,7 +255,9 @@ impl GigaCommunicate {
                         cobs_buffer,
                         cobs_buffer.len()
                     );
-                    info!("{}", msg);
+                    if !self.sensor_monitor {
+                        info!("{}", msg);
+                    }
                     // 處理 COBS Frame
                     let mut decoded_frame = vec![0; cobs_buffer.len() - 1]; // COBS 解碼後長度會減少
                     let decoded_report = decode(cobs_buffer, &mut decoded_frame).map_err(|e| {
@@ -240,39 +270,69 @@ impl GigaCommunicate {
                         decoded_frame,
                         decoded_report.frame_size()
                     );
-                    info!("{}", msg);
+                    if !self.sensor_monitor {
+                        info!("{}", msg);
+                    }
                     let decoded_message = Self::decode_message(&decoded_frame)?;
-                    let elapsed = start_time.elapsed();
-                    elapsed_list.push(elapsed);
-                    let avg_elapsed =
-                        elapsed_list.iter().sum::<Duration>() / (elapsed_list.len() as u32);
-                    let decoded_msg = format!(
-                        "耗時: {:>9}, 次數: {}, 平均耗時: {:>9} Action: {:?}, Command: {:?} {:?}\n\t{:30} {:02X?}, CRC bytes: {:02X?},\n\tPayload Bytes: {:02X?}, size: {}",
-                        format!("{:.2?}", elapsed),
-                        times,
-                        format!("{:.2?}", avg_elapsed),
+
+                    // 資料處理耗時
+                    let buffer_process_elapsed = self.buffer_process_start_time.elapsed();
+                    let msg = format!(
+                        "{:30} Action: {:?}, Command: {:?}, Payload Size bytes: {:02X?}, Payload: {:?}, CRC bytes: {:02X?}, Payload Bytes: {:02X?}, size: {}",
+                        "Decoded Message:",
                         decoded_message.action,
                         decoded_message.command,
-                        decoded_message.payload,
-                        "Payload Size bytes:",
                         decoded_message.payload_size_bytes,
+                        decoded_message.payload,
                         decoded_message.crc_bytes,
                         decoded_message.payload_bytes,
                         decoded_message.payload_size
                     );
+                    info!("{}", msg);
+
+                    process_buf_elapsed_list.push(buffer_process_elapsed);
+                    if process_buf_elapsed_list.len() > 100 {
+                        process_buf_elapsed_list.remove(0); // 保持列表長度不超過 100
+                    }
+
+                    // 平均資料處理耗時
+                    let avg_buffer_process_elapsed =
+                        process_buf_elapsed_list.iter().sum::<Duration>() /
+                        (process_buf_elapsed_list.len() as u32);
+
+                    let decoded_msg = format!(
+                        "{:30} [收資料: {:>9}, 平均收資料: {:>9}, 資料處理: {:>9}, 平均資料處理: {:>9}]",
+                        "耗時:",
+                        format!("{:.2?}", receive_elapsed),
+                        format!("{:.2?}", avg_receive_elapsed),
+                        format!("{:.2?}", buffer_process_elapsed),
+                        format!("{:.2?}", avg_buffer_process_elapsed)
+                    );
                     info!("{}", decoded_msg);
-                    // if decoded_message.command != Command::SensorHIGH {
-                    //     debug!("{}", decoded_msg);
-                    // }
                     *buffer_started = false; // 重置標記
-                    if *times % 1 == 0 {
+                    if
+                        decoded_message.command == Command::SensorHIGH ||
+                        decoded_message.command == Command::SensorLOW
+                    {
+                        // Old Ver.: 0x06 Triggered, 0x07 Not Triggered
+                        // New Ver.: 0x06 payload: {"name": "trigger_1", "triggered": true}, 0x06 payload: {"name":"trigger_2", "triggered": false}, HIGH: false, LOW: true
+                        // 根據 payload 判斷是否觸發
+                        let triggered_value = decoded_message.payload
+                            .get("triggered")
+                            .unwrap_or(&Value::Null);
+                        if let Value::Bool(triggered) = triggered_value {
+                            self.is_triggered = *triggered;
+                        } else {
+                            warn!("Payload does not contain 'triggered' key or is not a boolean");
+                            if decoded_message.command == Command::SensorHIGH {
+                                self.is_triggered = false;
+                            } else {
+                                self.is_triggered = true;
+                            }
+                        }
                         self.send_cobs_motor(Action::SEND, Command::MOTOR).await?;
                     }
-                    if *times > 10000 {
-                        return Ok(()); // 停止循環
-                    }
-                    *times += 1;
-                    *start_time = std::time::Instant::now(); // 重置計時器
+                    info!("{:30} {}", "Sensor Is Triggered:", self.is_triggered);
                 }
                 self.reset().await;
             }
@@ -291,10 +351,9 @@ impl GigaCommunicate {
 
     #[allow(unreachable_code)]
     pub async fn listen(&mut self) -> Result<(), Error> {
-        let mut times = 0; // 用於計算平均耗時
-        let mut start_time = std::time::Instant::now();
-        let mut elapsed_list = Vec::<Duration>::new(); // 用於存儲每次的耗時
         let mut buffer_started = false; // 標記是否已經開始接收資料
+        let mut receive_buf_elapsed_list = Vec::<Duration>::new(); // 用於存儲資料接收耗時
+        let mut process_buf_elapsed_list = Vec::<Duration>::new(); // 用於存儲資料處理耗時
 
         let debug_sequence = b"[DEBUG]";
         let mut receive_state = ReceiveState::Normal;
@@ -307,20 +366,20 @@ impl GigaCommunicate {
             match read_result {
                 Ok(_) => {
                     let received_byte = buf[0];
-                    if self.debug {
-                        debug!("Received byte: {:02X}", received_byte);
-                    }
                     match receive_state {
                         ReceiveState::Normal => {
+                            if self.debug && self.show_byte {
+                                debug!("byte[{}]: {:02X}", self.idx, received_byte);
+                            }
+
                             if received_byte == debug_sequence[0] {
                                 receive_state = ReceiveState::CheckingDebug(1);
                             } else {
                                 self.process_normal_byte(
                                     received_byte,
-                                    &mut times,
                                     &mut buffer_started,
-                                    &mut start_time,
-                                    &mut elapsed_list
+                                    &mut receive_buf_elapsed_list,
+                                    &mut process_buf_elapsed_list
                                 ).await?;
                             }
                         }
@@ -343,19 +402,17 @@ impl GigaCommunicate {
                                 for i in 0..match_count {
                                     self.process_normal_byte(
                                         debug_sequence[i],
-                                        &mut times,
                                         &mut buffer_started,
-                                        &mut start_time,
-                                        &mut elapsed_list
+                                        &mut receive_buf_elapsed_list,
+                                        &mut process_buf_elapsed_list
                                     ).await?;
                                 }
                                 // 處理當前字符
                                 self.process_normal_byte(
                                     received_byte,
-                                    &mut times,
                                     &mut buffer_started,
-                                    &mut start_time,
-                                    &mut elapsed_list
+                                    &mut receive_buf_elapsed_list,
+                                    &mut process_buf_elapsed_list
                                 ).await?;
                             }
                         }
@@ -364,7 +421,7 @@ impl GigaCommunicate {
                                 if debug_output.contains("CBOR Motor Receiver Ready") {
                                     // self.send_cobs_motor(Action::READ, Command::MOTOR).await?;
                                 }
-                                debug!("Giga: {}", debug_output);
+                                debug!("{:30} {}", format!("Giga:"), debug_output);
                                 debug_output.clear();
                                 receive_state = ReceiveState::Normal;
                             } else if received_byte == 0x1b {
@@ -382,14 +439,18 @@ impl GigaCommunicate {
                     match e.kind() {
                         ErrorKind::TimedOut => {
                             // timeout 正常
-                            info!("讀取串口資料超時，繼續等待...");
+                            if !self.sensor_monitor {
+                                warn!("讀取串口資料超時，傳送資料並繼續等待回覆...");
+                                self.send_cobs_motor(Action::READ, Command::MOTOR).await?;
+                            } else {
+                                warn!("等待 Sensor 資料...");
+                            }
                             continue;
                         }
                         _ => {
                             debug!("讀取串口資料失敗，可能是串口已關閉或發生錯誤");
                             // 嘗試關閉並重新打開串口
                             debug!("關閉序列埠: {}", self.port_name);
-                            sleep(Duration::from_secs(1)).await; // 等待 1 秒鐘
                             // 嘗試重新打開串口
                             self.port = match
                                 open_serial_port(
@@ -411,7 +472,6 @@ impl GigaCommunicate {
                                 }
                             };
                             debug!("重新打開序列埠: {}", self.port_name);
-                            sleep(Duration::from_secs(1)).await; // 等待 1 秒鐘
                             continue; // 重新開始循環
                         }
                     }
@@ -539,9 +599,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         "COM5" // 默認端口
     };
+
     let debug_mode = kwargs
         .get_key_value("debug")
         .map_or(false, |(_, v)| (v == "true" || v == "1"));
+    let show_byte = kwargs
+        .get_key_value("show_byte")
+        .map_or(false, |(_, v)| (v == "true" || v == "1"));
+
+    let sensor_monitor = kwargs.get("sensor_monitor").map_or(false, |v| (v == "true" || v == "1"));
 
     let timeout = kwargs
         .get("timeout")
@@ -584,7 +650,9 @@ async fn main() -> anyhow::Result<()> {
     info!("CBOR Test 開始 ================================================================");
     info!("使用串口: {}", port_name);
     info!("DEBUG 模式: {}", debug_mode);
+    info!("Show Byte: {}", show_byte);
     info!("超時設定: {:?}", timeout);
+    info!("Sensor Monitor Mode: {}", sensor_monitor);
 
     // payload
     let payload = StateMessage { status: 0 };
@@ -664,7 +732,15 @@ async fn main() -> anyhow::Result<()> {
         info!("\tFound port: {}", port.port_name);
     }
     let max_retries = 5; // 最大重試次數
-    let mut giga = GigaCommunicate::new(port_name, BAUD, timeout, max_retries, debug_mode).await?;
+    let mut giga = GigaCommunicate::new(
+        port_name,
+        BAUD,
+        timeout,
+        max_retries,
+        debug_mode,
+        show_byte,
+        sensor_monitor
+    ).await?;
 
     info!("成功打開序列埠: {}", port_name);
     // info!("等待 1 秒鐘...");
