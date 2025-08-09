@@ -9,7 +9,12 @@ use serde_cbor::Value;
 use model::{ Action, Command, Motion, StateMessage, Message };
 #[allow(unused_imports)]
 use tracing::{ info, error, debug, warn };
-use tracing_subscriber::{ fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt };
+use tracing_subscriber::{
+    fmt::{ self, format::{ self, FmtSpan } },
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 use tracing_appender::rolling;
 
 const BAUD: u32 = 460_800;
@@ -63,6 +68,9 @@ struct GigaCommunicate {
     buffer: [u8; MAX_DATA_LEN],
     buffer_receive_start_time: std::time::Instant,
     buffer_process_start_time: std::time::Instant,
+
+    info_msg_buf: Vec<String>,
+    debug_msg_buf: Vec<String>,
     idx: usize,
     len_bytes: [u8; 2],
     crc_bytes: [u8; 2],
@@ -106,6 +114,8 @@ impl GigaCommunicate {
             crc_bytes: [0u8; 2],
             payload_size: 0,
             is_triggered: false, // 初始狀態未觸發
+            info_msg_buf: Vec::new(),
+            debug_msg_buf: Vec::new(),
         })
     }
 
@@ -115,53 +125,9 @@ impl GigaCommunicate {
         self.len_bytes = [0u8; 2];
         self.crc_bytes = [0u8; 2];
         self.payload_size = 0;
-        debug!("重置索引和 buffer");
-    }
-
-    #[allow(dead_code)]
-    pub async fn send_motor(&mut self, action: Action, command: Command) -> Result<(), Error> {
-        let m1 = Motion {
-            name: "PMt".into(),
-            id: 5,
-            motion: 1,
-            speed: 100,
-            tol: 5,
-            dist: 2000,
-            angle: 100,
-            time: 5000,
-            acc: 300,
-            newid: 0,
-            volt: 12.0,
-            amp: 0.5,
-            temp: 25.0,
-            mode: 0,
-        };
-        let m2 = Motion {
-            name: "PMb".into(),
-            id: 4,
-            motion: 1,
-            speed: 100,
-            tol: 2,
-            dist: 1900,
-            angle: 60,
-            time: 4000,
-            acc: 400,
-            newid: 0,
-            volt: 12.0,
-            amp: 0.6,
-            temp: 26.0,
-            mode: 0,
-        };
-        let payload: Vec<Motion> = vec![m1, m2]; // 對應外層 3 元素陣列
-        debug!("Payload: {:?}", payload);
-        let payload_cbor: Vec<u8> = serde_cbor
-            ::to_vec(&payload)
-            .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
-        debug!("CBOR 資料: {:02X?}", payload_cbor);
-        debug!("CBOR 長度: {}", payload_cbor.len());
-        let (frame, _crc) = Self::build_frame(action, command, &payload_cbor);
-        self.send(&frame)?;
-        Ok(())
+        self.info_msg_buf.clear();
+        self.debug_msg_buf.clear();
+        // debug!("重置索引和 buffer");
     }
 
     pub async fn send_cobs_motor(&mut self, action: Action, command: Command) -> Result<(), Error> {
@@ -197,21 +163,29 @@ impl GigaCommunicate {
             temp: 26.0,
             mode: 0,
         };
-        let payload = vec![m1, m2]; // 對應外層 3 元素陣列
-        debug!("{:30} {:?}", "Payload COBS Frame:", payload);
+        let payload = vec![m1, m2];
+        let msg = format!("{:30} {:?}", "Payload:", payload);
+        debug!("{}", msg);
+
         let payload_cbor = serde_cbor::to_vec(&payload)?;
-        debug!("{:30} {:02X?}", "CBOR 資料 COBS Frame:", payload_cbor);
-        debug!("{:30} {}", "CBOR 長度 COBS Frame:", payload_cbor.len());
-        let (cobs_frame, _cobs_size, _crc) = Self::build_cobs_frame(action, command, &payload_cbor);
+        let msg = format!("{:30} size={} {:02X?}", "CBOR:", payload_cbor.len(), payload_cbor);
+        debug!("{}", msg);
+
+        let (cobs_frame, cobs_size, crc) = Self::build_cobs_frame(action, command, &payload_cbor);
+        let msg = format!("{:30} size={} crc={:02X?}", "COBS(CBOR):", cobs_size, crc);
+        debug!("{}", msg);
+
         let mut send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
-        send_cobs_frame.push(0x00); // 添加結束 byte
+        send_cobs_frame.push(0x00);
+
         self.send(&send_cobs_frame)?;
-        info!(
-            "{:30} size: {}, Payload: {:?}",
-            "Sending COBS Frame:",
+        let msg = format!(
+            "{:30} size={} {:02X?}",
+            "Send COBS:",
             send_cobs_frame.len(),
-            payload
+            send_cobs_frame
         );
+        debug!("{}", msg);
         Ok(())
     }
 
@@ -231,7 +205,6 @@ impl GigaCommunicate {
             0x00 => {
                 if !*buffer_started {
                     // 第一個 0x00 字節表示開始接收資料
-                    info!("開始接收資料...");
                     self.buffer_receive_start_time = std::time::Instant::now();
                     *buffer_started = true; // 標記已經開始接收資料
                 } else if self.buffer[0..self.idx].len() > 0 {
@@ -250,14 +223,13 @@ impl GigaCommunicate {
                     self.buffer_process_start_time = std::time::Instant::now();
                     let cobs_buffer = &self.buffer[0..self.idx];
                     let msg = format!(
-                        "{:30} {:02X?}, size: {}",
-                        "Received COBS Frame:",
-                        cobs_buffer,
-                        cobs_buffer.len()
+                        "{:30} size={} {:02X?}",
+                        "Received COBS:",
+                        cobs_buffer.len(),
+                        cobs_buffer
                     );
-                    if !self.sensor_monitor {
-                        info!("{}", msg);
-                    }
+                    debug!("{}", msg);
+
                     // 處理 COBS Frame
                     let mut decoded_frame = vec![0; cobs_buffer.len() - 1]; // COBS 解碼後長度會減少
                     let decoded_report = decode(cobs_buffer, &mut decoded_frame).map_err(|e| {
@@ -265,30 +237,34 @@ impl GigaCommunicate {
                         anyhow::anyhow!("COBS decode error: {}", e)
                     })?;
                     let msg = format!(
-                        "{:30} {:02X?}, size: {}",
-                        "Decoded COBS Frame:",
-                        decoded_frame,
-                        decoded_report.frame_size()
+                        "{:30} size={} {:02X?}",
+                        "Decoded COBS:",
+                        decoded_report.frame_size(),
+                        decoded_frame
                     );
-                    if !self.sensor_monitor {
-                        info!("{}", msg);
-                    }
+                    debug!("{}", msg);
+
                     let decoded_message = Self::decode_message(&decoded_frame)?;
 
                     // 資料處理耗時
                     let buffer_process_elapsed = self.buffer_process_start_time.elapsed();
                     let msg = format!(
-                        "{:30} Action: {:?}, Command: {:?}, Payload Size bytes: {:02X?}, Payload: {:?}, CRC bytes: {:02X?}, Payload Bytes: {:02X?}, size: {}",
+                        "{:30} bSize={:02X?} bCRC={:02X?} bPayload={:02X?}",
+                        "Decoded COBS Bytes:",
+                        decoded_message.payload_size_bytes,
+                        decoded_message.crc_bytes,
+                        decoded_message.payload_bytes
+                    );
+                    debug!("{}", msg);
+                    let msg = format!(
+                        "{:30} size={} Action={:?} Command={:?} Payload={:?}",
                         "Decoded Message:",
+                        decoded_message.payload_size,
                         decoded_message.action,
                         decoded_message.command,
-                        decoded_message.payload_size_bytes,
-                        decoded_message.payload,
-                        decoded_message.crc_bytes,
-                        decoded_message.payload_bytes,
-                        decoded_message.payload_size
+                        decoded_message.payload
                     );
-                    info!("{}", msg);
+                    debug!("{}", msg);
 
                     process_buf_elapsed_list.push(buffer_process_elapsed);
                     if process_buf_elapsed_list.len() > 100 {
@@ -300,18 +276,19 @@ impl GigaCommunicate {
                         process_buf_elapsed_list.iter().sum::<Duration>() /
                         (process_buf_elapsed_list.len() as u32);
 
-                    let decoded_msg = format!(
-                        "{:30} [收資料: {:>9}, 平均收資料: {:>9}, 資料處理: {:>9}, 平均資料處理: {:>9}]",
+                    let msg = format!(
+                        "{:28} 收資料: {:>9}, 平均收資料: {:>9}, 資料處理: {:>9}, 平均資料處理: {:>9}",
                         "耗時:",
                         format!("{:.2?}", receive_elapsed),
                         format!("{:.2?}", avg_receive_elapsed),
                         format!("{:.2?}", buffer_process_elapsed),
                         format!("{:.2?}", avg_buffer_process_elapsed)
                     );
-                    info!("{}", decoded_msg);
-                    *buffer_started = false; // 重置標記
+                    debug!("{}", msg);
+
+                    let mut update_sensor_trigger = false;
                     if
-                        decoded_message.command == Command::SensorHIGH ||
+                        decoded_message.command == Command::Sensor ||
                         decoded_message.command == Command::SensorLOW
                     {
                         // Old Ver.: 0x06 Triggered, 0x07 Not Triggered
@@ -323,16 +300,52 @@ impl GigaCommunicate {
                         if let Value::Bool(triggered) = triggered_value {
                             self.is_triggered = *triggered;
                         } else {
-                            warn!("Payload does not contain 'triggered' key or is not a boolean");
-                            if decoded_message.command == Command::SensorHIGH {
-                                self.is_triggered = false;
-                            } else {
-                                self.is_triggered = true;
+                            let mut is_motor_triggered_state = false;
+                            for motor_name in decoded_message.payload.keys() {
+                                if
+                                    let Some(motor_trigger_state) =
+                                        decoded_message.payload.get(motor_name)
+                                {
+                                    if let Value::Map(motor_triggered_value) = motor_trigger_state {
+                                        if
+                                            let Value::Bool(triggered) = motor_triggered_value
+                                                .get(&Value::Text("triggered".to_string()))
+                                                .unwrap_or(&Value::Null)
+                                        {
+                                            self.is_triggered = *triggered;
+                                            is_motor_triggered_state = true;
+                                            update_sensor_trigger = true;
+                                        } else {
+                                            warn!(
+                                                "Motor Payload does not contain 'triggered' key or is not a boolean"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !is_motor_triggered_state {
+                                warn!(
+                                    "Motor Payload does not contain 'triggered' key or is not a boolean"
+                                );
+                                if decoded_message.command == Command::Sensor {
+                                    self.is_triggered = false;
+                                } else {
+                                    self.is_triggered = true;
+                                }
                             }
                         }
                         self.send_cobs_motor(Action::SEND, Command::MOTOR).await?;
                     }
-                    info!("{:30} {}", "Sensor Is Triggered:", self.is_triggered);
+                    if update_sensor_trigger || self.debug {
+                        let msg = format!("{:30} {}", "Sensor Is Triggered:", self.is_triggered);
+                        info!("{}", msg);
+
+                        let msg = "=".repeat(80);
+                        info!("{}", msg);
+                    }
+                    *buffer_started = false; // 重置標記
                 }
                 self.reset().await;
             }
@@ -571,10 +584,10 @@ impl GigaCommunicate {
     }
 
     pub fn send(&mut self, frame: &[u8]) -> Result<(), Error> {
-        debug!("傳送資料: {:02X?}", frame);
+        // debug!("傳送資料: {:02X?}", frame);
         self.port.write_all(frame)?;
         self.port.flush()?;
-        debug!("資料傳送成功");
+        // debug!("資料傳送成功");
         Ok(())
     }
 }
@@ -627,13 +640,25 @@ async fn main() -> anyhow::Result<()> {
     let stdout_layer = fmt
         ::layer()
         .with_writer(std::io::stdout) // 終端輸出
+        .without_time() // 不印時間
         .with_target(false) // 不印 module 名
+        .with_file(false) // 顯示檔案名稱
+        .with_line_number(false) // 顯示行號
+        .with_thread_ids(true) // 顯示線程 ID
+        // .with_thread_names(true) // 顯示線程名稱
+        .with_span_events(FmtSpan::NONE) // 顯示 span 事件
         .with_ansi(true); // 顯示顏色
 
     // 3. 建 file layer
     let file_layer = fmt
         ::layer()
         .with_writer(file_writer) // 背景 thread 寫檔
+        .with_target(false) // 顯示模組路徑（target）
+        .with_file(true) // 顯示檔案名稱
+        .with_line_number(true) // 顯示行號
+        .with_thread_ids(true) // 顯示線程 ID
+        // .with_thread_names(true) // 顯示線程名稱
+        .with_span_events(FmtSpan::NONE) // 顯示 span 事件
         .with_ansi(false); // 檔案不要色碼
 
     // 4. 裝上去 & init
@@ -663,12 +688,8 @@ async fn main() -> anyhow::Result<()> {
     info!("{:30} {:02X?}, size: {}", "PayLoad CBOR:", payload_cbor, payload_cbor.len());
 
     // 建立要傳送的 frame
-    let (frame, _crc) = GigaCommunicate::build_frame(
-        Action::READ,
-        Command::SensorHIGH,
-        &payload_cbor
-    );
-    info!(
+    let (frame, _crc) = GigaCommunicate::build_frame(Action::READ, Command::Sensor, &payload_cbor);
+    let msg = format!(
         "{:30} {:02X?}, len: {}, {:02X?}, CRC: {:02X?}",
         "Send CBOR without COBS Frame:",
         frame,
@@ -676,6 +697,7 @@ async fn main() -> anyhow::Result<()> {
         (frame.len() as u16).to_le_bytes(),
         _crc.to_le_bytes()
     );
+    info!("{}", msg);
 
     // 建立 COBS 編碼的 frame
     let (cobs_frame, _cobs_size, crc) = GigaCommunicate::build_cobs_frame(
@@ -683,7 +705,7 @@ async fn main() -> anyhow::Result<()> {
         Command::MOTOR,
         &payload_cbor
     );
-    info!(
+    let msg = format!(
         "{:30} {:02X?}, size: {}, {:02X?}, CRC: {:02X?}",
         "CBOR with COBS Frame:",
         cobs_frame,
@@ -691,39 +713,50 @@ async fn main() -> anyhow::Result<()> {
         (_cobs_size as u16).to_le_bytes(),
         crc.to_le_bytes()
     );
+    info!("{}", msg);
 
     // 將 COBS 編碼的 frame 包裝成完整的傳送 frame
     // 這裡假設 START_BYTE 為 0x00，實際應根據協議定義
     let send_frame = vec![0x00].into_iter().chain(cobs_frame.clone()).collect::<Vec<u8>>();
     let send_frame_size = send_frame.len();
-    info!("{:30} {:02X?}, size: {}", "Send CBOR with COBS Frame:", send_frame, send_frame_size);
+    let msg = format!(
+        "{:30} {:02X?}, size: {}",
+        "Send CBOR with COBS Frame:",
+        send_frame,
+        send_frame_size
+    );
+    info!("{}", msg);
 
     // 模擬 COBS 解碼
     let mut decoded_frame = vec![0; _cobs_size - 1]; // COBS 解碼後長度會減少
     let decoded_report = decode(&cobs_frame, &mut decoded_frame)?;
-    info!(
+    let msg = format!(
         "{:30} {:02X?}, size: {}",
         "Decoded COBS Frame:",
         decoded_frame,
         decoded_report.frame_size()
     );
+    info!("{}", msg);
 
     let decoded_message = GigaCommunicate::decode_message(&decoded_frame)?;
-    info!(
-        "{:30} Action: {:?}, Command: {:?}, Payload Size bytes: {:02X?}, CRC bytes: {:02X?}",
+    let msg = format!(
+        "{:30} Action: {:?}, Command: {:?}, bSize: {:02X?}, bCRC: {:02X?}",
         "Decoded Message:",
         decoded_message.action,
         decoded_message.command,
         decoded_message.payload_size_bytes,
         decoded_message.crc_bytes
     );
-    info!(
+    info!("{}", msg);
+    let msg = format!(
         "{:30} {:02X?}, size: {}",
         "Decoded Payload Bytes:",
         decoded_message.payload_bytes,
         decoded_message.payload_size
     );
-    info!("{:30} {:?}", "Decoded Payload:", decoded_message.payload);
+    info!("{}", msg);
+    let msg = format!("{:30} {:?}", "Decoded Payload:", decoded_message.payload);
+    info!("{}", msg);
 
     // let frame = build_frame(CMD::SEND, Command::MOTOR, &payload_cbor);
     // let dst_frame = frame.clone();
@@ -749,5 +782,49 @@ async fn main() -> anyhow::Result<()> {
     // 4️⃣ 等待回覆
     info!("等待回覆...");
     giga.listen().await?;
+
+    // ** Test Zone ** //
+    // let mut payload = HashMap::new();
+    // payload.insert("SRc", HashMap::new());
+    // if let Some(val) = payload.get_mut("SRc") {
+    //     val.insert("triggered".to_string(), true);
+    // }
+    // info!("{:?}", payload);
+    // let payload_cbor: Vec<u8> = serde_cbor
+    //     ::to_vec(&payload)
+    //     .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
+    // info!("CBOR 資料: {:02X?}", payload_cbor);
+    // info!("CBOR 長度: {}", payload_cbor.len());
+    // let (cobs_frame, _cobs_size, _crc) = GigaCommunicate::build_cobs_frame(
+    //     Action::READ,
+    //     Command::SensorHIGH,
+    //     &payload_cbor
+    // );
+    // info!("Encoded Frame: {:02X?}", cobs_frame);
+    // let mut send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
+    // send_cobs_frame.push(0x00);
+    // info!("Sending COBS Frame: {:02X?}, size: {}", send_cobs_frame, send_cobs_frame.len());
+
+    // if let Some(val) = payload.get_mut("SRc") {
+    //     if let Some(triggered) = val.get_mut("triggered") {
+    //         *triggered = false;
+    //     }
+    // }
+    // info!("{:?}", payload);
+    // let payload_cbor: Vec<u8> = serde_cbor
+    //     ::to_vec(&payload)
+    //     .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
+    // info!("CBOR 資料: {:02X?}", payload_cbor);
+    // info!("CBOR 長度: {}", payload_cbor.len());
+    // let (cobs_frame, _cobs_size, _crc) = GigaCommunicate::build_cobs_frame(
+    //     Action::READ,
+    //     Command::SensorHIGH,
+    //     &payload_cbor
+    // );
+    // info!("Encoded Frame: {:02X?}", cobs_frame);
+    // let mut send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
+    // send_cobs_frame.push(0x00);
+    // info!("Sending COBS Frame: {:02X?}, size: {}", send_cobs_frame, send_cobs_frame.len());
+
     Ok(())
 }
