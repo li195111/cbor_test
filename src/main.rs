@@ -1,7 +1,6 @@
 mod model;
 
 use std::{ collections::HashMap, io::ErrorKind, time::Duration, vec };
-// use tokio::time::sleep;
 use anyhow::Error;
 use cobs::{ encode, decode };
 use crc::{ Crc, CRC_16_USB };
@@ -362,7 +361,6 @@ impl GigaCommunicate {
         Ok(())
     }
 
-    #[allow(unreachable_code)]
     pub async fn listen(&mut self) -> Result<(), Error> {
         let mut buffer_started = false; // 標記是否已經開始接收資料
         let mut receive_buf_elapsed_list = Vec::<Duration>::new(); // 用於存儲資料接收耗時
@@ -461,7 +459,7 @@ impl GigaCommunicate {
                             continue;
                         }
                         _ => {
-                            debug!("讀取串口資料失敗，可能是串口已關閉或發生錯誤");
+                            debug!("讀取串口資料失敗，可能是串口已關閉或發生錯誤: {}", e);
                             // 嘗試關閉並重新打開串口
                             debug!("關閉序列埠: {}", self.port_name);
                             // 嘗試重新打開串口
@@ -485,13 +483,12 @@ impl GigaCommunicate {
                                 }
                             };
                             debug!("重新打開序列埠: {}", self.port_name);
-                            continue; // 重新開始循環
+                            continue;
                         }
                     }
                 }
             }
         }
-        Ok(())
     }
 
     pub fn build_frame(action: Action, command: Command, payload: &[u8]) -> (Vec<u8>, u16) {
