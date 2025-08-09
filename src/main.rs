@@ -10,7 +10,7 @@ use model::{ Action, Command, Motion, StateMessage, Message };
 #[allow(unused_imports)]
 use tracing::{ info, error, debug, warn };
 use tracing_subscriber::{
-    fmt::{ self, format::{ self, FmtSpan } },
+    fmt::{ self, format::FmtSpan },
     layer::SubscriberExt,
     util::SubscriberInitExt,
     EnvFilter,
