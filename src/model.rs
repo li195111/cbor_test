@@ -2,13 +2,27 @@ use std::{ collections::HashMap, fmt::Display };
 use serde::{ Serialize, Deserialize };
 use serde_cbor::Value;
 
+#[derive(Debug, Clone, Copy)]
+pub enum ReceiveState {
+    Normal,
+    Debug,
+    CheckingDebug(usize), // 參數表示已匹配的 DEBUG 字符數量
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum Action {
-    SEND = 0xaa, // 發送資料
-    READ = 0xa8, // 讀取資料
-    GIGA = 0xae, // GIGA Notification
-    NONE = 0x00, // 無效指令
+    /// 發送資料
+    SEND = 0xaa,
+
+    /// 讀取資料
+    READ = 0xa8,
+
+    /// GIGA Notification
+    GIGA = 0xae,
+
+    /// 無效指令
+    NONE = 0x00,
 }
 
 impl TryFrom<u8> for Action {
@@ -34,30 +48,43 @@ impl Display for Action {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum Command {
-    NONE = 0x00, // 無效指令
-    ACK = 0x01, // 確認收到
-    NACK = 0x02, // 未確認收到
-    MOTOR = 0x03, // 馬達控制
-    SetID = 0x04, // 設定 ID
-    FILE = 0x05, // 檔案傳輸
-    Sensor = 0x06, // 高位元感測器
-    SensorLOW = 0x07, // 低位元感測器
+    /// 無效指令
+    NONE = 0x00,
+
+    /// 確認收到
+    ACK = 0x01,
+
+    /// 未確認收到
+    NACK = 0x02,
+
+    /// 馬達控制
+    MOTOR = 0x03,
+
+    /// 設定 ID
+    SetID = 0x04,
+
+    /// 檔案傳輸
+    FILE = 0x05,
+
+    /// 高位元感測器
+    Sensor = 0x06,
+
+    /// 低位元感測器
+    SensorLOW = 0x07,
 }
 
-impl TryFrom<u8> for Command {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+impl From<u8> for Command {
+    fn from(value: u8) -> Self {
         match value {
-            0x00 => Ok(Command::NONE),
-            0x01 => Ok(Command::ACK),
-            0x02 => Ok(Command::NACK),
-            0x03 => Ok(Command::MOTOR),
-            0x04 => Ok(Command::SetID),
-            0x05 => Ok(Command::FILE),
-            0x06 => Ok(Command::Sensor),
-            0x07 => Ok(Command::SensorLOW),
-            _ => Err("Invalid Command Byte"),
+            0x00 => Command::NONE,
+            0x01 => Command::ACK,
+            0x02 => Command::NACK,
+            0x03 => Command::MOTOR,
+            0x04 => Command::SetID,
+            0x05 => Command::FILE,
+            0x06 => Command::Sensor,
+            0x07 => Command::SensorLOW,
+            _ => Command::NONE,
         }
     }
 }
@@ -119,20 +146,31 @@ pub struct PayloadMessage {
 
 impl Display for PayloadMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "PayloadMessage(payload: {:?})", self.payload)
+        match serde_json::to_string_pretty(&self.payload) {
+            Ok(json) => write!(f, "PayloadMessage: {}", json),
+            Err(_) => write!(f, "Error converting payload to JSON"),
+        }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
-    pub action: Action, // 動作
-    pub command: Command, // 指令
-    pub payload_size_bytes: Vec<u8>, // Payload 大小 bytes
-    pub payload_size: u16, // Payload 大小
-    pub payload_bytes: Vec<u8>, // Payload 資料 bytes
-    pub payload: HashMap<String, Value>, // Payload 資料
-    pub crc_bytes: Vec<u8>, // CRC 校驗碼 bytes
-    pub crc: u16, // CRC 校驗碼
+    /// 動作
+    pub action: Action,
+    /// 指令
+    pub command: Command,
+    /// Payload 大小 bytes
+    pub payload_size_bytes: Vec<u8>,
+    /// Payload 大小
+    pub payload_size: u16,
+    /// Payload 資料 bytes
+    pub payload_bytes: Vec<u8>,
+    /// Payload 資料
+    pub payload: HashMap<String, Value>,
+    /// CRC 校驗碼 bytes
+    pub crc_bytes: Vec<u8>,
+    /// CRC 校驗碼
+    pub crc: u16,
 }
 
 #[allow(dead_code)]
@@ -221,23 +259,9 @@ impl From<u32> for ErrorCode {
 
 impl Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ErrorCode::Success => write!(f, "Success"),
-            ErrorCode::DataMissMatch => write!(f, "Data Miss Match"),
-            ErrorCode::UnknownError => write!(f, "Unknown Error"),
-            ErrorCode::MemoryOverload => write!(f, "Memory Overload"),
-            ErrorCode::DecodeCBORError => write!(f, "Decode CBOR Error"),
-            ErrorCode::CRCError => write!(f, "CRC Error"),
-            ErrorCode::DataOverload => write!(f, "Data Overload"),
-            ErrorCode::StorageAccessFailure => write!(f, "Storage Access Failure"),
-            ErrorCode::FileAccessViolation => write!(f, "File Access Violation"),
-            ErrorCode::WiFiPartitionError => write!(f, "WiFi Partition Error"),
-            ErrorCode::UserPartitionError => write!(f, "User Partition Error"),
-            ErrorCode::MountingFileSystemFailed => write!(f, "Mounting File System Failed"),
-            ErrorCode::InvalidID => write!(f, "Invalid ID"),
-            ErrorCode::InvalidCMD => write!(f, "Invalid Command"),
-            ErrorCode::SendCMDFail => write!(f, "Send Command Fail"),
-            ErrorCode::WriteNVRamFail => write!(f, "Write NVRAM Fail"),
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => write!(f, "{}", json),
+            Err(_) => write!(f, "Error converting to JSON"),
         }
     }
 }
