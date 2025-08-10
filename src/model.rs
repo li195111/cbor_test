@@ -71,20 +71,34 @@ impl Display for Command {
 /// 對應 Arduino encode_cbor() 內兩個 9 元素子陣列
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Motion {
-    pub name: String, // 馬達名子 string "PMt" / "PMb"
-    pub id: u8, // 數值 int8
-    pub motion: u8, // 馬達動作，數值int8，0: 停止，1:轉動
-    pub speed: i64, // 設定的速度，數值 int64，有正負
-    pub tol: u8, // %誤差範圍，數值int8，0~100
-    pub dist: u32, // 距離，數值 int64
-    pub angle: u32, // 轉動角度，數值int64，0~359
-    pub time: u32, // 轉動時間，數值int64, ms
-    pub acc: u32, // 加速度，數值 int64
-    pub newid: u8, // 改變後新id，數值 int8
-    pub volt: f32, // 電壓， float
-    pub amp: f32, // 電流， float
-    pub temp: f32, // 溫度， float
-    pub mode: u8, // 馬達運行模式，數值int8，0:default，1:位置，2:速度
+    /// 馬達名子, string "PMt" / "PMb"
+    pub name: String,
+    /// ID, 數值 int8, 1~254, Read/Write
+    pub id: u8,
+    /// 馬達動作, 數值int8, 0: 停止, 1:轉動, Read/Write
+    pub motion: u8,
+    /// 設定的速度, 數值 int64, 有正負, -15000~15000, Read/Write
+    pub speed: i64,
+    /// %誤差範圍, 數值int8, 0~100
+    pub tol: u8,
+    /// 距離, 數值 int64
+    pub dist: u64,
+    /// 轉動角度, 數值 int64, 0~359
+    pub angle: u64,
+    /// 轉動時間, 數值 int64, ms
+    pub time: u64,
+    /// 加速度, 數值 int64, 0~66635, Read/Write
+    pub acc: u64,
+    /// 改變後新id,  數值 int8, 1~254, Read/Write
+    pub newid: u8,
+    /// 電壓 float, 0.0~27.0, Read Only
+    pub volt: f32,
+    /// 電流 float, 0.0~6.0, Read Only
+    pub amp: f32,
+    /// 溫度 float, -40.0~125.0, Read Only
+    pub temp: f32,
+    /// 馬達運行模式, 數值int8, 0:default, 1:位置, 2:速度
+    pub mode: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,6 +171,73 @@ impl Default for Message {
             payload: HashMap::new(),
             crc_bytes: Vec::new(),
             crc: 0,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum ErrorCode {
+    Success = 0,
+    DataMissMatch = 1001,
+    UnknownError,
+    MemoryOverload,
+    DecodeCBORError,
+    CRCError,
+    DataOverload,
+    StorageAccessFailure,
+    FileAccessViolation,
+    WiFiPartitionError,
+    UserPartitionError,
+    MountingFileSystemFailed,
+    InvalidID,
+    InvalidCMD,
+    SendCMDFail,
+    WriteNVRamFail,
+}
+
+impl From<u32> for ErrorCode {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => ErrorCode::Success,
+            1001 => ErrorCode::DataMissMatch,
+            1002 => ErrorCode::UnknownError,
+            1003 => ErrorCode::MemoryOverload,
+            1004 => ErrorCode::DecodeCBORError,
+            1005 => ErrorCode::CRCError,
+            1006 => ErrorCode::DataOverload,
+            1007 => ErrorCode::StorageAccessFailure,
+            1008 => ErrorCode::FileAccessViolation,
+            1009 => ErrorCode::WiFiPartitionError,
+            1010 => ErrorCode::UserPartitionError,
+            1011 => ErrorCode::MountingFileSystemFailed,
+            1012 => ErrorCode::InvalidID,
+            1013 => ErrorCode::InvalidCMD,
+            1014 => ErrorCode::SendCMDFail,
+            1015 => ErrorCode::WriteNVRamFail,
+            _ => ErrorCode::UnknownError, // 預設為未知錯誤
+        }
+    }
+}
+
+impl Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorCode::Success => write!(f, "Success"),
+            ErrorCode::DataMissMatch => write!(f, "Data Miss Match"),
+            ErrorCode::UnknownError => write!(f, "Unknown Error"),
+            ErrorCode::MemoryOverload => write!(f, "Memory Overload"),
+            ErrorCode::DecodeCBORError => write!(f, "Decode CBOR Error"),
+            ErrorCode::CRCError => write!(f, "CRC Error"),
+            ErrorCode::DataOverload => write!(f, "Data Overload"),
+            ErrorCode::StorageAccessFailure => write!(f, "Storage Access Failure"),
+            ErrorCode::FileAccessViolation => write!(f, "File Access Violation"),
+            ErrorCode::WiFiPartitionError => write!(f, "WiFi Partition Error"),
+            ErrorCode::UserPartitionError => write!(f, "User Partition Error"),
+            ErrorCode::MountingFileSystemFailed => write!(f, "Mounting File System Failed"),
+            ErrorCode::InvalidID => write!(f, "Invalid ID"),
+            ErrorCode::InvalidCMD => write!(f, "Invalid Command"),
+            ErrorCode::SendCMDFail => write!(f, "Send Command Fail"),
+            ErrorCode::WriteNVRamFail => write!(f, "Write NVRAM Fail"),
         }
     }
 }
