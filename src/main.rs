@@ -1,11 +1,6 @@
-mod model;
-mod serial;
-mod arduino;
-
 use std::{ collections::HashMap, time::Duration, vec };
 use cobs::{ decode };
-#[allow(unused_imports)]
-use tracing::{ info, error, debug, warn };
+use tracing::*;
 use tracing_subscriber::{
     fmt::{ self, format::FmtSpan },
     layer::SubscriberExt,
@@ -14,7 +9,7 @@ use tracing_subscriber::{
 };
 use tracing_appender::rolling;
 
-use crate::{ model::{ Action, Command, StateMessage }, arduino::{ Giga, BAUD } };
+use pingpong_core::{ arduino::{ Giga, BAUD, Action, Command, StateMessage } };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -112,14 +107,18 @@ async fn main() -> anyhow::Result<()> {
     info!("{:30} {:02X?}, size: {}", "PayLoad CBOR:", payload_cbor, payload_cbor.len());
 
     // 建立要傳送的 frame
-    let (frame, _crc) = Giga::build_frame(Action::READ, Command::Sensor, &payload_cbor);
+    let (frame, cobs_size, crc) = Giga::build_cobs_frame(
+        Action::READ,
+        Command::Sensor,
+        &payload_cbor
+    );
     let msg = format!(
         "{:30} {:02X?}, len: {}, {:02X?}, CRC: {:02X?}",
         "Send CBOR without COBS Frame:",
         frame,
-        frame.len(),
-        (frame.len() as u16).to_le_bytes(),
-        _crc.to_le_bytes()
+        cobs_size,
+        (cobs_size as u16).to_le_bytes(),
+        crc.to_le_bytes()
     );
     info!("{}", msg);
 
@@ -189,15 +188,7 @@ async fn main() -> anyhow::Result<()> {
         info!("\tFound port: {}", port.port_name);
     }
     let max_retries = 5; // 最大重試次數
-    let mut giga = Giga::new(
-        port_name,
-        BAUD,
-        timeout,
-        max_retries,
-        debug_mode,
-        show_byte,
-        sensor_monitor
-    ).await?;
+    let mut giga = Giga::new(port_name, BAUD, timeout, max_retries, debug_mode, show_byte).await?;
 
     info!("成功打開序列埠: {}", port_name);
     // info!("等待 1 秒鐘...");
