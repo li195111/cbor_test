@@ -1,12 +1,7 @@
 use std::{ collections::HashMap, time::Duration, vec };
 use cobs::{ decode };
 use tracing::*;
-use tracing_subscriber::{
-    fmt::{ self, format::FmtSpan },
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    EnvFilter,
-};
+use tracing_subscriber::{ fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter };
 use tracing_appender::rolling;
 
 use pingpong_core::{ arduino::{ Giga, BAUD, Action, Command, StateMessage } };
@@ -64,8 +59,6 @@ async fn main() -> anyhow::Result<()> {
         .with_file(false) // 顯示檔案名稱
         .with_line_number(false) // 顯示行號
         .with_thread_ids(true) // 顯示線程 ID
-        // .with_thread_names(true) // 顯示線程名稱
-        .with_span_events(FmtSpan::NONE) // 顯示 span 事件
         .with_ansi(true); // 顯示顏色
 
     // 3. 建 file layer
@@ -76,8 +69,6 @@ async fn main() -> anyhow::Result<()> {
         .with_file(true) // 顯示檔案名稱
         .with_line_number(true) // 顯示行號
         .with_thread_ids(true) // 顯示線程 ID
-        // .with_thread_names(true) // 顯示線程名稱
-        .with_span_events(FmtSpan::NONE) // 顯示 span 事件
         .with_ansi(false); // 檔案不要色碼
 
     // 4. 裝上去 & init
