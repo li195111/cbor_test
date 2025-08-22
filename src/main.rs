@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     // 建立 COBS 編碼的 frame
     let (cobs_frame, _cobs_size, crc) = Giga::build_cobs_frame(
         Action::SEND,
-        Command::MOTOR,
+        Command::Motor,
         &payload_cbor
     );
     let msg = format!(
