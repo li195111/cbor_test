@@ -14,4 +14,4 @@ tokio = { version = "1.46.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "time"] }
-pingpong-core = { version = "0.7.1", git = "ssh://git@github.com/li195111/pingpong-core.git" }
+pingpong-core = { version = "0.7.2", git = "ssh://git@github.com/li195111/pingpong-core.git" }
