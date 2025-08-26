@@ -189,7 +189,9 @@ async fn main() -> anyhow::Result<()> {
         "🎉 Payload Test Complete ================================================================"
     );
 
-    info!("ℹ️ Giga Connection Test ================================================================");
+    info!(
+        "ℹ️ Giga Connection Test ================================================================"
+    );
     info!("ℹ️ Search Serial Ports:");
     // 2️⃣ 打開序列埠
     for port in serialport::available_ports()? {
@@ -252,6 +254,22 @@ async fn main() -> anyhow::Result<()> {
         info!("🔔 Use 'show_giga=true' to Show Giga Message");
         info!("🔔 Use 'show_giga_interval' to Set Giga Message Interval");
         info!("🔔 Sample JSON: {}", sample_json);
+        info!(
+            "🔔 {} {}, {}, {}",
+            format!("{:<30}", "Action:"),
+            Action::SEND,
+            Action::READ,
+            Action::GIGA
+        );
+        info!(
+            "🔔 {} {}, {}, {}, {}, {}",
+            format!("{:<30}", "Cmd:"),
+            Command::Ack,
+            Command::NAck,
+            Command::Motor,
+            Command::Sensor,
+            Command::File
+        );
         // 移交唯一的 Arc<Giga> 到背景任務，避免多重 Arc 使 Arc::get_mut 失效
         let mut giga_arc = giga_arc;
         let exit_flag_clone = exit_flag.clone();
