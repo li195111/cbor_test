@@ -1,10 +1,22 @@
-use std::{ collections::HashMap, time::Duration, vec };
+use std::{
+    collections::HashMap,
+    sync::{ atomic::{ AtomicBool, Ordering }, Arc },
+    time::{ Duration, Instant },
+    vec,
+};
+use configparser::ini::Ini;
 use cobs::{ decode };
+use tokio::sync::{ mpsc, Mutex };
 use tracing::*;
 use tracing_subscriber::{ fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter };
 use tracing_appender::rolling;
 
-use pingpong_core::{ arduino::{ Giga, BAUD, Action, Command, StateMessage } };
+use pingpong_core::{
+    arduino::{ Action, Command, Giga, SensorConfig, StateMessage, BAUD },
+    imu_sensor::MotorCommandParams,
+};
+
+static LAST_GIGA_LOG: std::sync::OnceLock<std::sync::Mutex<Instant>> = std::sync::OnceLock::new();
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,16 +46,16 @@ async fn main() -> anyhow::Result<()> {
         .get_key_value("show_byte")
         .map_or(false, |(_, v)| (v == "true" || v == "1"));
 
-    let sensor_monitor = kwargs.get("sensor_monitor").map_or(false, |v| (v == "true" || v == "1"));
-
     let timeout = kwargs
         .get("timeout")
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(Duration::from_secs(1), Duration::from_secs);
+        .and_then(|v| v.parse::<f64>().ok())
+        .map_or(Duration::from_secs_f64(0.0005), Duration::from_secs_f64);
+    let show_giga = kwargs.get("show_giga").map_or(false, |v| (v == "true" || v == "1"));
+    let show_giga_interval = kwargs
+        .get("show_giga_interval")
+        .and_then(|v| v.parse::<f64>().ok())
+        .map_or(Duration::from_secs_f64(0.1), Duration::from_secs_f64);
 
-    // let proj_exe = std::env::current_exe().unwrap();
-    // let proj_root_dir = proj_exe.parent().unwrap();
-    // let log_dir = proj_root_dir.join("logs");
     let dir_name = "logs";
     let file_name = "cbor_test.log";
     // 1. 準備檔案 appender（logs/YYYY-MM-DD.log）
@@ -82,13 +94,15 @@ async fn main() -> anyhow::Result<()> {
     // 5. **保留 guard**（否則 app 結束前可能 flush 不到）
     let _guard = guard;
 
-    info!("CBOR Test 開始 ================================================================");
-    info!("使用串口: {}", port_name);
-    info!("DEBUG 模式: {}", debug_mode);
-    info!("Show Byte: {}", show_byte);
-    info!("超時設定: {:?}", timeout);
-    info!("Sensor Monitor Mode: {}", sensor_monitor);
+    info!("ℹ️ CBOR Test 開始 ================================================================");
+    info!("{} {}", format!("{:<30}", "Use Serial Port:"), port_name);
+    info!("{} {}", format!("{:<30}", "DEBUG Mode:"), debug_mode);
+    info!("{} {:?}", format!("{:<30}", "Timeout:"), timeout);
+    info!("{} {}", format!("{:<30}", "Show Byte:"), show_byte);
+    info!("{} {}", format!("{:<30}", "Show Giga Message:"), show_giga);
+    info!("{} {:?}", format!("{:<30}", "Show Giga Message Interval(sec.):"), show_giga_interval);
 
+    info!("ℹ️ Payload Test ================================================================");
     // payload
     let payload = StateMessage { status: 0 };
     info!("{:30} {}, size: {}", "PayLoad:", payload, std::mem::size_of_val(&payload));
@@ -171,66 +185,170 @@ async fn main() -> anyhow::Result<()> {
     info!("{}", msg);
     let msg = format!("{:30} {:?}", "Decoded Payload:", decoded_message.payload);
     info!("{}", msg);
+    info!(
+        "🎉 Payload Test Complete ================================================================"
+    );
 
-    // let frame = build_frame(CMD::SEND, Command::MOTOR, &payload_cbor);
-    // let dst_frame = frame.clone();
+    info!("ℹ️ Giga Connection Test ================================================================");
+    info!("ℹ️ Search Serial Ports:");
     // 2️⃣ 打開序列埠
     for port in serialport::available_ports()? {
         info!("\tFound port: {}", port.port_name);
     }
-    let max_retries = 5; // 最大重試次數
-    let mut giga = Giga::new(port_name, BAUD, timeout, max_retries, debug_mode, show_byte).await?;
 
-    info!("成功打開序列埠: {}", port_name);
-    // info!("等待 1 秒鐘...");
-    // giga.send_cobs_motor(Action::SEND, Command::MOTOR).await?;
+    let exit_flag = Arc::new(AtomicBool::new(false));
+    let is_giga_connected = Arc::new(AtomicBool::new(false));
+    let is_giga_sensor_triggered = Arc::new(AtomicBool::new(false));
 
-    // 4️⃣ 等待回覆
-    info!("等待回覆...");
-    giga.listen().await?;
+    let (giga_send_tx, mut giga_send_rx) = mpsc::channel::<MotorCommandParams>(128);
 
-    // ** Test Zone ** //
-    // let mut payload = HashMap::new();
-    // payload.insert("SRc", HashMap::new());
-    // if let Some(val) = payload.get_mut("SRc") {
-    //     val.insert("triggered".to_string(), true);
-    // }
-    // info!("{:?}", payload);
-    // let payload_cbor: Vec<u8> = serde_cbor
-    //     ::to_vec(&payload)
-    //     .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
-    // info!("CBOR 資料: {:02X?}", payload_cbor);
-    // info!("CBOR 長度: {}", payload_cbor.len());
-    // let (cobs_frame, _cobs_size, _crc) = GigaCommunicate::build_cobs_frame(
-    //     Action::READ,
-    //     Command::SensorHIGH,
-    //     &payload_cbor
-    // );
-    // info!("Encoded Frame: {:02X?}", cobs_frame);
-    // let mut send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
-    // send_cobs_frame.push(0x00);
-    // info!("Sending COBS Frame: {:02X?}, size: {}", send_cobs_frame, send_cobs_frame.len());
+    let mut config = Ini::new();
+    config.set("SENSOR.WINDOWS", "PORT", Some(port_name.to_string()));
+    config.set("SENSOR.UNIX", "PORT", Some(port_name.to_string()));
+    config.set("SENSOR", "TRIGGER_TIMEOUT", Some("2".to_string()));
+    config.set("SENSOR", "BAUDRATE", Some(BAUD.to_string()));
+    config.set("SENSOR", "TIMEOUT", Some(timeout.as_secs_f64().to_string()));
+    config.set("DEFAULT", "DEBUG", Some(debug_mode.to_string()));
 
-    // if let Some(val) = payload.get_mut("SRc") {
-    //     if let Some(triggered) = val.get_mut("triggered") {
-    //         *triggered = false;
-    //     }
-    // }
-    // info!("{:?}", payload);
-    // let payload_cbor: Vec<u8> = serde_cbor
-    //     ::to_vec(&payload)
-    //     .map_err(|e| anyhow::anyhow!("CBOR encode error: {}", e))?;
-    // info!("CBOR 資料: {:02X?}", payload_cbor);
-    // info!("CBOR 長度: {}", payload_cbor.len());
-    // let (cobs_frame, _cobs_size, _crc) = GigaCommunicate::build_cobs_frame(
-    //     Action::READ,
-    //     Command::SensorHIGH,
-    //     &payload_cbor
-    // );
-    // info!("Encoded Frame: {:02X?}", cobs_frame);
-    // let mut send_cobs_frame = vec![0x00].into_iter().chain(cobs_frame).collect::<Vec<u8>>();
-    // send_cobs_frame.push(0x00);
-    // info!("Sending COBS Frame: {:02X?}, size: {}", send_cobs_frame, send_cobs_frame.len());
+    let sensor_config = Arc::new(Mutex::new(SensorConfig::new(config).await?));
 
+    let giga_opt = Giga::connection(
+        &sensor_config,
+        &is_giga_connected,
+        move |msg| {
+            if msg.action != Action::GIGA {
+                info!("{} Message Resp: {:?}", msg.action, msg);
+            } else if show_giga {
+                {
+                    let now = Instant::now();
+                    let lock = LAST_GIGA_LOG.get_or_init(||
+                        std::sync::Mutex::new(now - show_giga_interval)
+                    );
+                    let mut last = lock.lock().unwrap();
+                    if now.duration_since(*last) >= show_giga_interval {
+                        *last = now;
+                        info!("{} Message Recv: {:?}", msg.action, msg);
+                    }
+                }
+            }
+        },
+        move |msg| {
+            info!("Send CBOR: {} {:?}", msg.len(), msg);
+        },
+        move |msg| {
+            info!("Send COBS: {} {:?}", msg.len(), msg);
+        }
+    ).await;
+
+    if let Some(giga_arc) = giga_opt {
+        info!("ℹ️ 成功打開序列埠: {}", port_name);
+        // 4️⃣ 等待回覆
+        info!("⏳ 等待回覆...");
+
+        let sample_json = format!(
+            "{{\"action\": \"SEND\", \"cmd\": \"Motor\", \"payload\": {{\"PMt\": {{  \"id\": 1,  \"motion\": 1,  \"rpm\": 500,  \"acc\": 0,  \"volt\": 0,  \"temp\": 0,  \"amp\": 0 }}}}}}"
+        );
+        info!("🔔 Use 'q' or '/q' to Exit program");
+        info!("🔔 Use 'show_giga=true' to Show Giga Message");
+        info!("🔔 Use 'show_giga_interval' to Set Giga Message Interval");
+        info!("🔔 Sample JSON: {}", sample_json);
+        // 移交唯一的 Arc<Giga> 到背景任務，避免多重 Arc 使 Arc::get_mut 失效
+        let mut giga_arc = giga_arc;
+        let exit_flag_clone = exit_flag.clone();
+        tokio::task::spawn(async move {
+            let mut is_first_log = true;
+            loop {
+                let triggered = if is_giga_connected.load(Ordering::Acquire) {
+                    // 這裡使用唯一的 Arc，Arc::get_mut 會成功，確保能呼叫需要 &mut self 的方法
+                    if let Some(giga_inner) = Arc::get_mut(&mut giga_arc) {
+                        match giga_inner.listen_once().await {
+                            Ok(_) => {/* 正常輪詢一次 */}
+                            Err(e) => {
+                                giga_inner.exit_flag.store(true, Ordering::Release);
+                                debug!("Giga Listen Error, connection lost: {}", e);
+                                is_giga_connected.store(false, Ordering::Release);
+                                warn!(
+                                    "Sensor connection lost, use trigger_reconnect() to reconnect"
+                                );
+                                tokio::task::yield_now().await;
+                                continue;
+                            }
+                        }
+
+                        while let Ok(send_msg) = giga_send_rx.try_recv() {
+                            if
+                                let Err(e) = giga_inner.send_cobs_object(
+                                    send_msg.payload,
+                                    send_msg.action,
+                                    send_msg.cmd
+                                ).await
+                            {
+                                error!("Failed to send Giga Data: {}", e);
+                            }
+                        }
+                    }
+                    giga_arc.is_triggered.load(Ordering::Acquire)
+                } else {
+                    is_giga_sensor_triggered.load(Ordering::Acquire)
+                };
+
+                if triggered && is_first_log {
+                    {
+                        // Do something
+                    }
+                    is_first_log = false;
+                } else if !triggered && !is_first_log {
+                    is_first_log = true;
+                }
+
+                if exit_flag_clone.load(Ordering::Acquire) {
+                    info!("========== Giga Exiting ==========");
+                    // 直接對內部的 Giga 設定退出旗標
+                    if is_giga_connected.load(Ordering::Acquire) {
+                        giga_arc.exit_flag.store(true, Ordering::Release);
+                    }
+                    info!("========== Giga Stop ==========");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        loop {
+            let mut input = String::new();
+            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+            info!("Wait JSON Enter...");
+            let n = tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut input).await?;
+            if n == 0 {
+                continue;
+            }
+            let line = input.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.eq_ignore_ascii_case("/q") || line.eq_ignore_ascii_case("q") {
+                exit_flag.store(true, Ordering::Release);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                break;
+            }
+            match serde_json::from_str::<MotorCommandParams>(line) {
+                Ok(cmd) => {
+                    info!("Received: {:?}", cmd);
+                    if let Err(e) = giga_send_tx.send(cmd).await {
+                        error!("Failed to enqueue command: {}", e);
+                    } else {
+                        info!("Command queued");
+                    }
+                }
+                Err(e) => {
+                    error!("Invalid JSON: {}", e);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    } else {
+        error!("Failed to open serial port: {}", port_name);
+    }
+    info!("🎊 CBOR Test Complete ================================================================");
     Ok(())
 }
