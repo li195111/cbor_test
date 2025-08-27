@@ -22,3 +22,4 @@ configparser = "3.1.0"
 pingpong-core = { path = "/Users/liyuefong/Desktop/JamesYeh/pingpong-core" }
 
 [target.'cfg(target_os = "windows")'.patch.'ssh://git@github.com/li195111/pingpong-core.git']
+pingpong-core = { path = "F:/Programing/QC/Products/james_yeh_applications/pingpong-core" }
