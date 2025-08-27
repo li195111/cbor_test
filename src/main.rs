@@ -221,16 +221,20 @@ async fn main() -> anyhow::Result<()> {
             if msg.action != Action::GIGA {
                 info!("{} Message Resp: {:?}", msg.action, msg);
             } else if show_giga {
-                {
-                    let now = Instant::now();
-                    let lock = LAST_GIGA_LOG.get_or_init(||
-                        std::sync::Mutex::new(now - show_giga_interval)
-                    );
-                    let mut last = lock.lock().unwrap();
-                    if now.duration_since(*last) >= show_giga_interval {
-                        *last = now;
-                        info!("{} Message Recv: {:?}", msg.action, msg);
-                    }
+                let now = Instant::now();
+                let lock = LAST_GIGA_LOG.get_or_init(||
+                    std::sync::Mutex::new(now - show_giga_interval)
+                );
+                let mut last = lock.lock().unwrap();
+                if now.duration_since(*last) >= show_giga_interval {
+                    *last = now;
+                    info!("{} Message Recv: {:?}", msg.action, msg.payload);
+                    // let keys = msg.payload.keys();
+                    // for key in keys {
+                    //     if key == "GigaReadBuf" {
+                    //         info!("{} Message Recv: {:?}", msg.action, msg.payload);
+                    //     }
+                    // }
                 }
             }
         },
@@ -253,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
         info!("🔔 Use 'q' or '/q' to Exit program");
         info!("🔔 Use 'show_giga=true' to Show Giga Message");
         info!("🔔 Use 'show_giga_interval' to Set Giga Message Interval");
+        info!("🔔 Use '/t=N' to Send N times of Motor Payload");
         info!("🔔 Sample JSON: {}", sample_json);
         info!(
             "🔔 {} {}, {}, {}",
@@ -331,7 +336,24 @@ async fn main() -> anyhow::Result<()> {
                 tokio::task::yield_now().await;
             }
         });
-
+        let tag_list = [
+            "id",
+            "motion",
+            "rpm",
+            "tol",
+            "dist",
+            "angle",
+            "time",
+            "acc",
+            "newid",
+            "volt",
+            "amp",
+            "temp",
+            "mode",
+            "status",
+        ];
+        let test_motor_name = "PMt";
+        let mut test_json_str;
         loop {
             let mut input = String::new();
             let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
@@ -340,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
             if n == 0 {
                 continue;
             }
-            let line = input.trim();
+            let mut line = input.trim();
             if line.is_empty() {
                 continue;
             }
@@ -349,6 +371,37 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 break;
             }
+            line = if line.starts_with("/t=") {
+                let n = line.trim_start_matches("/t=");
+                if let Ok(test_count) = n.parse::<u64>() {
+                    let mut payload_map = serde_json::Map::new();
+                    for i in 0..test_count {
+                        let k = if i > 0 {
+                            format!("{}{}", test_motor_name, i)
+                        } else {
+                            test_motor_name.to_string()
+                        };
+                        let v = tag_list.to_vec();
+                        payload_map.insert(k, v.into());
+                    }
+                    let mut test_json_map = serde_json::Map::new();
+                    test_json_map.insert("action".to_string(), "READ".into());
+                    test_json_map.insert("cmd".to_string(), "Motor".into());
+                    test_json_map.insert(
+                        "payload".to_string(),
+                        serde_json::Value::Object(payload_map)
+                    );
+                    test_json_str = serde_json::to_string(&test_json_map).unwrap();
+                    info!("Generated test JSON: {}", test_json_str);
+                    test_json_str.as_str()
+                } else {
+                    error!("Invalid test count value: {}", n);
+                    line
+                }
+            } else {
+                line
+            };
+
             match serde_json::from_str::<MotorCommandParams>(line) {
                 Ok(cmd) => {
                     info!("Received: {:?}", cmd);
