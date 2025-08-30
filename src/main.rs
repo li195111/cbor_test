@@ -216,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
     let sensor_config = Arc::new(Mutex::new(SensorConfig::new(config).await?));
 
     let mut giga_opt = Giga::connection(
+        show_byte,
         &sensor_config,
         &is_giga_connected,
         move |msg| {
@@ -284,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
             while let Ok(reconnect) = giga_reconnect_rx.try_recv() {
                 if reconnect {
                     giga_opt = Giga::reconnect(
+                        show_byte,
                         &sensor_config,
                         &is_giga_connected,
                         move |msg| {
