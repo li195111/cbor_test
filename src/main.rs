@@ -12,7 +12,16 @@ use tracing_subscriber::{ fmt, layer::SubscriberExt, util::SubscriberInitExt, En
 use tracing_appender::rolling;
 
 use pingpong_core::{
-    arduino::{ Action, Command, Giga, SensorConfig, StateMessage, BAUD },
+    arduino::{
+        Action,
+        Command,
+        Giga,
+        SensorConfig,
+        StateMessage,
+        BAUD,
+        build_cobs_frame,
+        decode_message,
+    },
     imu_sensor::MotorCommandParams,
 };
 
@@ -96,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("ℹ️ CBOR Test 開始 ================================================================");
     info!("{} {}", format!("{:<30}", "Use Serial Port:"), port_name);
+    info!("{} {}", format!("{:<30}", "Use Baud Rate:"), BAUD);
     info!("{} {}", format!("{:<30}", "DEBUG Mode:"), debug_mode);
     info!("{} {:?}", format!("{:<30}", "Timeout:"), timeout);
     info!("{} {}", format!("{:<30}", "Show Byte:"), show_byte);
@@ -112,11 +122,7 @@ async fn main() -> anyhow::Result<()> {
     info!("{:30} {:02X?}, size: {}", "PayLoad CBOR:", payload_cbor, payload_cbor.len());
 
     // 建立要傳送的 frame
-    let (frame, cobs_size, crc) = Giga::build_cobs_frame(
-        Action::READ,
-        Command::Sensor,
-        &payload_cbor
-    );
+    let (frame, cobs_size, crc) = build_cobs_frame(Action::READ, Command::Sensor, &payload_cbor);
     let msg = format!(
         "{:30} {:02X?}, len: {}, {:02X?}, CRC: {:02X?}",
         "Send CBOR without COBS Frame:",
@@ -128,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     info!("{}", msg);
 
     // 建立 COBS 編碼的 frame
-    let (cobs_frame, _cobs_size, crc) = Giga::build_cobs_frame(
+    let (cobs_frame, _cobs_size, crc) = build_cobs_frame(
         Action::SEND,
         Command::Motor,
         &payload_cbor
@@ -166,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("{}", msg);
 
-    let decoded_message = Giga::decode_message(&decoded_frame)?;
+    let decoded_message = decode_message(&decoded_frame)?;
     let msg = format!(
         "{:30} Action: {:?}, Command: {:?}, bSize: {:02X?}, bCRC: {:02X?}",
         "Decoded Message:",
@@ -231,12 +237,6 @@ async fn main() -> anyhow::Result<()> {
                 if now.duration_since(*last) >= show_giga_interval {
                     *last = now;
                     info!("{} Message Recv: {:?}", msg.action, msg.payload);
-                    // let keys = msg.payload.keys();
-                    // for key in keys {
-                    //     if key == "GigaReadBuf" {
-                    //         info!("{} Message Recv: {:?}", msg.action, msg.payload);
-                    //     }
-                    // }
                 }
             }
         },
@@ -300,12 +300,6 @@ async fn main() -> anyhow::Result<()> {
                                 if now.duration_since(*last) >= show_giga_interval {
                                     *last = now;
                                     info!("{} Message Recv: {:?}", msg.action, msg.payload);
-                                    // let keys = msg.payload.keys();
-                                    // for key in keys {
-                                    //     if key == "GigaReadBuf" {
-                                    //         info!("{} Message Recv: {:?}", msg.action, msg.payload);
-                                    //     }
-                                    // }
                                 }
                             }
                         },
@@ -323,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ref mut giga_arc) = giga_opt {
                     if let Some(giga_inner) = Arc::get_mut(giga_arc) {
                         match giga_inner.listen_once().await {
-                            Ok(_) => {/* 正常輪詢一次 */}
+                            Ok(_) => {}
                             Err(e) => {
                                 giga_inner.exit_flag.store(true, Ordering::Release);
                                 debug!("Giga Listen Error, connection lost: {}", e);
@@ -414,10 +408,11 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_millis(100)).await;
             break;
         }
-        if line.eq_ignore_ascii_case("/r") {
+        if line.eq_ignore_ascii_case("/r") || line.eq_ignore_ascii_case("r") {
             if let Err(e) = giga_reconnect_tx.send(true).await {
                 error!("Failed to send reconnect signal: {}", e);
             }
+            continue;
         }
         line = if line.starts_with("/t=") {
             let n = line.trim_start_matches("/t=");
