@@ -2,3 +2,4 @@
 Cargo.lock
 logs/*
 .DS_Store
+.cargo/*
