@@ -3,29 +3,55 @@ use std::{
     sync::{ atomic::{ AtomicBool, Ordering }, Arc },
     time::{ Duration, Instant },
     vec,
+    io::{ self, Write },
 };
+
 use configparser::ini::Ini;
 use cobs::{ decode };
-use tokio::sync::{ mpsc, Mutex };
+use serde::{ Serialize, Deserialize };
+use tokio::{ io::BufReader, sync::{ mpsc, Mutex } };
+use serde_json::Value;
 use tracing::*;
 use tracing_subscriber::{ fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter };
 use tracing_appender::rolling;
 
-use pingpong_core::{
-    arduino::{
-        Action,
-        Command,
-        Giga,
-        SensorConfig,
-        StateMessage,
-        BAUD,
-        build_cobs_frame,
-        decode_message,
-    },
-    imu_sensor::MotorCommandParams,
+use pingpong_arduino::{
+    Action,
+    Command,
+    Giga,
+    SensorConfig,
+    StateMessage,
+    DEFAULT_BAUDRATE,
+    build_cobs_frame,
+    decode_message,
 };
 
 static LAST_GIGA_LOG: std::sync::OnceLock<std::sync::Mutex<Instant>> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetMotorPayload {
+    pub id: u8,
+    pub motion: u8,
+    pub rpm: i64,
+    pub acc: u64,
+    pub volt: f32,
+    pub temp: f32,
+    pub amp: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Payload {
+    Set(HashMap<String, SetMotorPayload>),
+    Read(HashMap<String, Value>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotorCommandParams {
+    pub action: Action,
+    pub cmd: Command,
+    pub payload: Payload,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -105,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("ℹ️ CBOR Test 開始 ================================================================");
     info!("{} {}", format!("{:<30}", "Use Serial Port:"), port_name);
-    info!("{} {}", format!("{:<30}", "Use Baud Rate:"), BAUD);
+    info!("{} {}", format!("{:<30}", "Use Baud Rate:"), DEFAULT_BAUDRATE);
     info!("{} {}", format!("{:<30}", "DEBUG Mode:"), debug_mode);
     info!("{} {:?}", format!("{:<30}", "Timeout:"), timeout);
     info!("{} {}", format!("{:<30}", "Show Byte:"), show_byte);
@@ -215,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
     config.set("SENSOR.WINDOWS", "PORT", Some(port_name.to_string()));
     config.set("SENSOR.UNIX", "PORT", Some(port_name.to_string()));
     config.set("SENSOR", "TRIGGER_TIMEOUT", Some("2".to_string()));
-    config.set("SENSOR", "BAUDRATE", Some(BAUD.to_string()));
+    config.set("SENSOR", "BAUDRATE", Some(DEFAULT_BAUDRATE.to_string()));
     config.set("SENSOR", "TIMEOUT", Some(timeout.as_secs_f64().to_string()));
     config.set("DEFAULT", "DEBUG", Some(debug_mode.to_string()));
 
@@ -322,10 +348,9 @@ async fn main() -> anyhow::Result<()> {
                                 giga_inner.exit_flag.store(true, Ordering::Release);
                                 debug!("Giga Listen Error, connection lost: {}", e);
                                 is_giga_connected.store(false, Ordering::Release);
-                                warn!(
-                                    "Sensor connection lost, use trigger_reconnect() to reconnect"
-                                );
-                                tokio::task::yield_now().await;
+                                warn!("Giga connection lost, use `/r` or `r` to reconnect");
+                                print!("\n>> ");
+                                io::stdout().flush().unwrap();
                                 continue;
                             }
                         }
@@ -393,8 +418,12 @@ async fn main() -> anyhow::Result<()> {
     let mut test_json_str;
     loop {
         let mut input = String::new();
-        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-        info!("Wait JSON Enter...");
+
+        print!("\n>> ");
+        io::stdout().flush().unwrap();
+
+        // 建立一個非同步的 BufReader 來讀取 stdin
+        let mut reader = BufReader::new(tokio::io::stdin());
         let n = tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut input).await?;
         if n == 0 {
             continue;
