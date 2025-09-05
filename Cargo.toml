@@ -17,3 +17,10 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "tim
 pingpong-arduino = { git = "ssh://git@github.com/li195111/pingpong-arduino.git" }
 serde_json = "1.0.143"
 configparser = "3.1.0"
+
+[profile.release]
+debug = false
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"
