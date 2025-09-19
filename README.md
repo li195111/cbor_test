@@ -113,7 +113,7 @@ Enter JSON strings that match the `MotorCommandParams` structure:
 /t=3
 ```
 
-This generates a test JSON with 3 motor payloads for quick testing.
+This generates a test JSON with 3 motor payloads (`PMt`, `PMt1`, `PMt2`) for quick testing. The generated command requests data for standard tags: `["id", "motion", "rpm", "tol", "dist", "angle", "time", "acc", "newid", "volt", "amp", "temp", "mode", "status"]`.
 
 ### Real-time Monitoring
 
@@ -123,6 +123,7 @@ When `show_giga=true` is enabled, the application displays live sensor data from
 
 - `src/main.rs`: Main application logic including argument parsing, logging setup, and async communication loops
 - `Cargo.toml`: Project dependencies and configuration
+- `SPEC.feature`: Gherkin-based specification file defining system behavior, user interactions, and protocol handling
 - `logs/`: Directory containing daily rolling log files (`cbor_test.log.YYYY-MM-DD`)
 - `.github/copilot-instructions.md`: AI agent guidance for this codebase
 
@@ -143,6 +144,15 @@ When `show_giga=true` is enabled, the application displays live sensor data from
 2. **Device Not Found**: Check the serial port name and that the Arduino is connected
 3. **Connection Lost**: Use `/r` command to reconnect, or restart the application
 4. **Invalid JSON**: Verify JSON format matches `MotorCommandParams` structure
+5. **Permission Denied**: On macOS/Linux, you may need to use `sudo` or add your user to the appropriate group (e.g., `dialout`)
+
+### Debugging Steps
+
+1. **Enable Debug Mode**: Use `debug=true` to see detailed operation logs
+2. **Check Raw Data**: Use `show_byte=true` to inspect protocol-level communication
+3. **Verify Device Communication**: Use `show_giga=true` to monitor sensor data
+4. **Review Logs**: Check daily log files in `logs/` directory for detailed history
+5. **Test Communication**: Use `/t=1` to send a simple test command
 
 ### Logging
 
@@ -153,6 +163,14 @@ When `show_giga=true` is enabled, the application displays live sensor data from
 
 ### Performance Tips
 
-- Adjust `timeout` parameter for slower devices
+- Adjust `timeout` parameter for slower devices (e.g., `timeout=0.001`)
 - Use `show_giga_interval` to control sensor data display frequency
 - Monitor log file sizes in production environments
+- Use `/t=N` for quick testing without manually crafting JSON commands
+
+### Development Notes
+
+- The `SPEC.feature` file contains comprehensive behavior specifications in Gherkin format
+- Payload structure supports both command data (`Set`) and read requests (`Read`) via untagged enum
+- Automatic reconnection is handled by the background task; manual reconnect available with `/r`
+- All user input commands are case-insensitive
