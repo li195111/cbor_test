@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
     let stdout_layer = fmt
         ::layer()
         .with_writer(std::io::stdout) // 終端輸出
-        .without_time() // 不印時間
+        // .without_time() // 不印時間
         .with_target(false) // 不印 module 名
         .with_file(false) // 顯示檔案名稱
         .with_line_number(false) // 顯示行號
