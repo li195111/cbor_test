@@ -16,14 +16,7 @@ use tracing_subscriber::{ fmt, layer::SubscriberExt, util::SubscriberInitExt, En
 use tracing_appender::rolling;
 
 use pingpong_arduino::{
-    Action,
-    Command,
-    Giga,
-    SensorConfig,
-    StateMessage,
-    DEFAULT_BAUDRATE,
-    build_cobs_frame,
-    decode_message,
+    build_cobs_frame, decode_message, Action, Command, Giga, SensorConfig, StateMessage, DEFAULT_BAUDRATE
 };
 
 static LAST_GIGA_LOG: std::sync::OnceLock<std::sync::Mutex<Instant>> = std::sync::OnceLock::new();
@@ -55,6 +48,7 @@ pub struct MotorCommandParams {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let buardrate = 38400; // DEFAULT_BAUDRATE;
     let args: Vec<String> = std::env::args().collect();
     let kwargs: HashMap<String, String> = args
         .iter()
@@ -131,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("ℹ️ CBOR Test 開始 ================================================================");
     info!("{} {}", format!("{:<30}", "Use Serial Port:"), port_name);
-    info!("{} {}", format!("{:<30}", "Use Baud Rate:"), DEFAULT_BAUDRATE);
+    info!("{} {}", format!("{:<30}", "Use Baud Rate:"), buardrate);
     info!("{} {}", format!("{:<30}", "DEBUG Mode:"), debug_mode);
     info!("{} {:?}", format!("{:<30}", "Timeout:"), timeout);
     info!("{} {}", format!("{:<30}", "Show Byte:"), show_byte);
@@ -238,10 +232,11 @@ async fn main() -> anyhow::Result<()> {
     let (giga_reconnect_tx, mut giga_reconnect_rx) = mpsc::channel::<bool>(128);
 
     let mut config = Ini::new();
+    config.set("DEFAULT", "LEGACY", Some("true".to_string()));
     config.set("SENSOR.WINDOWS", "PORT", Some(port_name.to_string()));
     config.set("SENSOR.UNIX", "PORT", Some(port_name.to_string()));
     config.set("SENSOR", "TRIGGER_TIMEOUT", Some("2".to_string()));
-    config.set("SENSOR", "BAUDRATE", Some(DEFAULT_BAUDRATE.to_string()));
+    config.set("SENSOR", "BAUDRATE", Some(buardrate.to_string()));
     config.set("SENSOR", "TIMEOUT", Some(timeout.as_secs_f64().to_string()));
     config.set("DEFAULT", "DEBUG", Some(debug_mode.to_string()));
 
