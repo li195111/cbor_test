@@ -48,7 +48,7 @@ pub struct MotorCommandParams {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let buardrate = 38400; // DEFAULT_BAUDRATE;
+    let buardrate = DEFAULT_BAUDRATE;
     let args: Vec<String> = std::env::args().collect();
     let kwargs: HashMap<String, String> = args
         .iter()
@@ -232,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
     let (giga_reconnect_tx, mut giga_reconnect_rx) = mpsc::channel::<bool>(128);
 
     let mut config = Ini::new();
-    config.set("DEFAULT", "LEGACY", Some("true".to_string()));
+    config.set("DEFAULT", "LEGACY", Some("false".to_string()));
     config.set("SENSOR.WINDOWS", "PORT", Some(port_name.to_string()));
     config.set("SENSOR.UNIX", "PORT", Some(port_name.to_string()));
     config.set("SENSOR", "TRIGGER_TIMEOUT", Some("2".to_string()));
