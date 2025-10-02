@@ -226,7 +226,6 @@ async fn main() -> anyhow::Result<()> {
 
     let exit_flag = Arc::new(AtomicBool::new(false));
     let is_giga_connected = Arc::new(AtomicBool::new(false));
-    let is_giga_sensor_triggered = Arc::new(AtomicBool::new(false));
 
     let (giga_send_tx, mut giga_send_rx) = mpsc::channel::<MotorCommandParams>(128);
     let (giga_reconnect_tx, mut giga_reconnect_rx) = mpsc::channel::<bool>(128);
@@ -302,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
     let exit_flag_clone = exit_flag.clone();
     tokio::task::spawn(async move {
         let mut is_first_log = true;
+        let mut previous_triggered_count = 0;
         loop {
             while let Ok(reconnect) = giga_reconnect_rx.try_recv() {
                 if reconnect {
@@ -334,7 +334,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            let triggered = if is_giga_connected.load(Ordering::Acquire) {
+            let current_triggered_count = if is_giga_connected.load(Ordering::Acquire) {
                 if let Some(ref mut giga_arc) = giga_opt {
                     if let Some(giga_inner) = Arc::get_mut(giga_arc) {
                         match giga_inner.listen_once().await {
@@ -362,13 +362,15 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-                    giga_arc.is_triggered.load(Ordering::Acquire)
+                    giga_arc.triggered_counts.load(Ordering::Acquire)
                 } else {
-                    false
+                    0
                 }
             } else {
-                is_giga_sensor_triggered.load(Ordering::Acquire)
+                0
             };
+
+            let triggered = current_triggered_count != previous_triggered_count;
 
             if triggered && is_first_log {
                 {
@@ -390,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
                 info!("========== Giga Stop ==========");
                 break;
             }
+            previous_triggered_count = current_triggered_count;
             tokio::task::yield_now().await;
         }
     });
